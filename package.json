@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "securekit-monorepo",
   "private": true,
   "workspaces": [
@@ -17,6 +17,7 @@
     "@typescript-eslint/parser": "^8.7.0",
     "@typescript-eslint/eslint-plugin": "^8.7.0",
     "prettier": "^3.3.3",
+
     "tsup": "^8.2.4",
     "tsx": "^4.19.1"
   }

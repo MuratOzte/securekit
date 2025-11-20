@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@securekit/node-auth",
   "version": "0.1.0",
   "private": true,
@@ -9,10 +9,13 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
     "tsup": "^8.2.4",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"
