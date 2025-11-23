@@ -32,6 +32,12 @@ importers:
 
   apps/demo-web:
     dependencies:
+      '@securekit/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@securekit/web-sdk':
+        specifier: workspace:*
+        version: link:../../packages/web-sdk
       react:
         specifier: ^19.1.1
         version: 19.2.0
@@ -87,6 +93,9 @@ importers:
 
   packages/node-auth:
     dependencies:
+      '@securekit/core':
+        specifier: workspace:*
+        version: link:../core
       cors:
         specifier: ^2.8.5
         version: 2.8.5

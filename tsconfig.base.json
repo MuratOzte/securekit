@@ -1,17 +1,17 @@
 ﻿{
   "compilerOptions": {
-    "target": "ES2022",
+    "target": "ES2020",
     "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
+    "moduleResolution": "bundler",
     "strict": true,
-    "skipLibCheck": true,
-    "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    "types": [], "baseUrl": ".", "paths": { "@securekit/core": ["packages/core/src/index.ts"] }
+    "skipLibCheck": true,
+    "allowJs": false,
+    "baseUrl": ".",
+    "paths": {
+      "@securekit/core": ["packages/core/src"],
+      "@securekit/web-sdk": ["packages/web-sdk/src"],
+      "@securekit/node-auth": ["packages/node-auth/src"]
+    }
   }
 }
-
