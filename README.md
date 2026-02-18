@@ -188,3 +188,70 @@ curl -X POST http://localhost:3001/challenge/text/consume \
   -H "Content-Type: application/json" \
   -d '{"challengeId":"YOUR_CHALLENGE_ID"}'
 ```
+
+## Demo'da deneme (SecureKit Playground)
+
+Playground ekrani: `apps/demo-web/src/components/SecureKitPlayground.tsx`
+
+Bu ekranda su akislari butonlarla calisir:
+
+- `POST /verify/network`
+- `POST /verify/location`
+- `POST /session/start` -> opsiyonel network/location -> `POST /verify/session`
+- `POST /consent`
+- `POST /enroll/keystroke` (deterministic fake events)
+- `GET /user/:userId/profiles`
+- `DELETE /user/biometrics`
+
+### 1) Environment ayarla
+
+Demo app env:
+
+```bash
+cp apps/demo-web/.env.example apps/demo-web/.env
+```
+
+`apps/demo-web/.env`:
+
+- `VITE_SECUREKIT_BASE_URL=/api/securekit`
+- `VITE_SECUREKIT_DEV_PROXY_TARGET=http://localhost:3001`
+
+Node auth env (opsiyonel ornek):
+
+```bash
+cp packages/node-auth/.env.example packages/node-auth/.env
+```
+
+### 2) Backend calistir
+
+Normal (gercek python + vpnapi):
+
+```bash
+pnpm --filter @securekit/node-auth dev
+```
+
+Mock mode (python/dis API olmadan):
+
+```powershell
+$env:MOCK_IP_CHECK="1"; pnpm --filter @securekit/node-auth dev
+```
+
+Playground'daki `Mock scenario` secimi ile `clean` / `risky` fixture gorebilirsin.
+
+### 3) Demo app calistir
+
+```bash
+pnpm --filter demo-web dev
+```
+
+Tarayicida ac:
+
+- `http://localhost:5173`
+
+### 4) Base URL hata senaryosu
+
+`VITE_SECUREKIT_BASE_URL` yanlissa Playground her istekte acik hata mesaji gosterir:
+
+- hedef URL (`baseUrl`)
+- HTTP status veya baglanti hatasi bilgisi
+- `VITE_SECUREKIT_BASE_URL` kontrolu icin yonlendirme

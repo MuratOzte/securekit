@@ -1,18 +1,8 @@
 import React from "react";
-import { LocationCheckTester } from "./components/LocationCheckTester.js";
-import { SessionFlowTester } from "./components/SessionFlowTester.js";
-import { ChallengeTextTester } from "./components/ChallengeTextTester.js";
-import { EnrollmentTester } from "./components/EnrollmentTester.js";
+import { SecureKitPlayground } from "./components/SecureKitPlayground.js";
 
 function App() {
-  return (
-    <div style={{ padding: 16 }}>
-      <LocationCheckTester />
-      <SessionFlowTester />
-      <ChallengeTextTester />
-      <EnrollmentTester />
-    </div>
-  );
+  return <SecureKitPlayground />;
 }
 
 export default App;

@@ -175,6 +175,15 @@ function parseAllowedCountries(body: unknown): string[] | undefined {
   return normalized.length > 0 ? Array.from(new Set(normalized)) : [];
 }
 
+function parseMockScenario(body: unknown): RunIpCheckParams["scenario"] | undefined {
+  const source = (body ?? {}) as { scenario?: unknown };
+  if (source.scenario === "clean" || source.scenario === "risky") {
+    return source.scenario;
+  }
+
+  return undefined;
+}
+
 function parseLegacyCountryInputs(body: unknown): {
   expectedCountryCode: string | null;
   clientCountryCode: string | null;
@@ -404,10 +413,12 @@ function buildEmptyProfiles(userId: string, nowIso: string): UserProfiles {
 async function resolveNetworkCheck(args: {
   ip: string;
   clientOffsetMin: number | null;
+  scenario?: RunIpCheckParams["scenario"];
   runIpCheck: RunIpCheckFn;
 }): Promise<{ ipCheck: IpCheckOutput; network: NetworkResult }> {
   const ipCheck = await args.runIpCheck(args.ip, {
     clientOffsetMin: args.clientOffsetMin,
+    scenario: args.scenario,
   });
 
   const network = computeNetworkResult(ipCheck, args.clientOffsetMin, args.ip);
@@ -769,6 +780,7 @@ export function createApp(deps: CreateAppDeps = {}) {
   app.post("/verify/network", async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const clientOffsetMin = parseClientOffsetMin(req.body);
+    const scenario = parseMockScenario(req.body);
 
     if (!ip) {
       res.status(400).json(
@@ -784,6 +796,7 @@ export function createApp(deps: CreateAppDeps = {}) {
       const { network } = await resolveNetworkCheck({
         ip,
         clientOffsetMin,
+        scenario,
         runIpCheck,
       });
 
@@ -802,6 +815,7 @@ export function createApp(deps: CreateAppDeps = {}) {
   app.post("/verify/location", async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const allowedCountries = parseAllowedCountries(req.body);
+    const scenario = parseMockScenario(req.body);
 
     if (!ip) {
       res.status(400).json(
@@ -814,7 +828,7 @@ export function createApp(deps: CreateAppDeps = {}) {
     }
 
     try {
-      const ipCheck = await runIpCheck(ip);
+      const ipCheck = await runIpCheck(ip, { scenario });
       const location = buildLocationResultFromIpCheck({
         ipCheck,
         allowedCountries,
@@ -903,6 +917,7 @@ export function createApp(deps: CreateAppDeps = {}) {
   app.post("/verify/location:country", async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const { expectedCountryCode, clientCountryCode } = parseLegacyCountryInputs(req.body);
+    const scenario = parseMockScenario(req.body);
 
     if (!ip) {
       const result: LocationCountryResult = {
@@ -942,6 +957,7 @@ export function createApp(deps: CreateAppDeps = {}) {
 
       const ipCheck = await runIpCheck(ip, {
         expectedCountryCode: expectedCountryCode ?? clientCountryCode,
+        scenario,
       });
 
       const location = buildLocationResultFromIpCheck({
