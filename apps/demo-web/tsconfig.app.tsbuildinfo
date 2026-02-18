@@ -1,0 +1,1 @@
+{"root":["./src/lib/securekitclient.ts","./src/app.tsx","./src/main.tsx","./src/components/challengetexttester.tsx","./src/components/enrollmenttester.tsx","./src/components/locationchecktester.tsx","./src/components/sessionflowtester.tsx"],"version":"5.9.3"}

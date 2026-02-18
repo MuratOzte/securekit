@@ -2,13 +2,38 @@ import cors from "cors";
 import express, { type Request, type Response } from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { LocationResult, NetworkResult, VerifyError } from "@securekit/core";
+import {
+  type ConsentLog,
+  type ConsentRequest,
+  type ConsentResponse,
+  type DeleteBiometricsRequest,
+  type DeleteBiometricsResponse,
+  type EnrollKeystrokeRequest,
+  type EnrollKeystrokeResponse,
+  type GetProfilesResponse,
+  type KeystrokeEvent,
+  type KeystrokeProfile,
+  type LocationResult,
+  type NetworkResult,
+  type UserProfiles,
+  type VerifyError,
+} from "@securekit/core";
+import { buildKeystrokeProfile } from "../../core/src/biometrics/keystrokeProfile";
 import {
   runIpCheck as defaultRunIpCheck,
   type IpCheckOutput,
   type RunIpCheckParams,
 } from "./services/ipCheck";
 import { computeNetworkResult } from "./services/networkScore";
+import { createSessionRouter } from "./routes/session";
+import { InMemorySessionStore } from "./session/inMemoryStore";
+import type { SessionStore } from "./session/store";
+import { createChallengeRouter, resolveChallengeTtlMs } from "./routes/challenge";
+import { InMemoryChallengeStore } from "./challenge/inMemoryStore";
+import type { ChallengeStore } from "./challenge/store";
+import type { Rng } from "./challenge/generateText";
+import type { StorageAdapter } from "./storage/adapter";
+import { InMemoryAdapter } from "./storage/inMemoryAdapter";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -65,6 +90,13 @@ type RunIpCheckFn = (ip: string, params?: RunIpCheckParams) => Promise<IpCheckOu
 
 export interface CreateAppDeps {
   runIpCheck?: RunIpCheckFn;
+  sessionStore?: SessionStore;
+  challengeStore?: ChallengeStore;
+  storage?: StorageAdapter;
+  challengeRng?: Rng;
+  nowFn?: () => number;
+  nowFnIso?: () => string;
+  challengeTtlSeconds?: number;
 }
 
 function normalizeCountryCode(code: unknown): string | null {
@@ -177,6 +209,196 @@ function extractIpRegion(ipCheck: IpCheckOutput): string | null {
 
 function makeError(error: VerifyError): { error: VerifyError } {
   return { error };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readRequiredStringField(
+  source: Record<string, unknown>,
+  field: string,
+  fieldErrors: Record<string, string>
+): string {
+  const value = source[field];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    fieldErrors[field] = `${field} is required.`;
+    return "";
+  }
+
+  return value.trim();
+}
+
+function parseConsentRequest(body: unknown): {
+  request: ConsentRequest | null;
+  fieldErrors: Record<string, string>;
+} {
+  const fieldErrors: Record<string, string> = {};
+  if (!isRecord(body)) {
+    fieldErrors.body = "Request body must be an object.";
+    return { request: null, fieldErrors };
+  }
+
+  const userId = readRequiredStringField(body, "userId", fieldErrors);
+  const consentVersion = readRequiredStringField(body, "consentVersion", fieldErrors);
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { request: null, fieldErrors };
+  }
+
+  return {
+    request: {
+      userId,
+      consentVersion,
+    },
+    fieldErrors,
+  };
+}
+
+function parseKeystrokeEvent(
+  input: unknown,
+  index: number,
+  fieldErrors: Record<string, string>
+): KeystrokeEvent | null {
+  if (!isRecord(input)) {
+    fieldErrors[`events[${index}]`] = "Each event must be an object.";
+    return null;
+  }
+
+  const key = input.key;
+  if (typeof key !== "string" || key.trim().length === 0) {
+    fieldErrors[`events[${index}].key`] = "key must be a non-empty string.";
+  }
+
+  const type = input.type;
+  const validType = type === "down" || type === "up";
+  if (!validType) {
+    fieldErrors[`events[${index}].type`] = "type must be 'down' or 'up'.";
+  }
+
+  const t = input.t;
+  const validTime = typeof t === "number" && Number.isFinite(t);
+  if (!validTime) {
+    fieldErrors[`events[${index}].t`] = "t must be a finite number.";
+  }
+
+  if (typeof key !== "string" || key.trim().length === 0 || !validType || !validTime) {
+    return null;
+  }
+
+  return {
+    key: key.trim(),
+    type: type as KeystrokeEvent["type"],
+    t: t as number,
+  };
+}
+
+function parseEnrollKeystrokeRequest(body: unknown): {
+  request: EnrollKeystrokeRequest | null;
+  fieldErrors: Record<string, string>;
+} {
+  const fieldErrors: Record<string, string> = {};
+  if (!isRecord(body)) {
+    fieldErrors.body = "Request body must be an object.";
+    return { request: null, fieldErrors };
+  }
+
+  const userId = readRequiredStringField(body, "userId", fieldErrors);
+
+  if (!Array.isArray(body.events) || body.events.length === 0) {
+    fieldErrors.events = "events must be a non-empty array.";
+    return { request: null, fieldErrors };
+  }
+
+  const events: KeystrokeEvent[] = [];
+  body.events.forEach((event, index) => {
+    const parsed = parseKeystrokeEvent(event, index, fieldErrors);
+    if (parsed) events.push(parsed);
+  });
+
+  let challengeId: string | undefined;
+  if (body.challengeId !== undefined) {
+    if (typeof body.challengeId !== "string" || body.challengeId.trim().length === 0) {
+      fieldErrors.challengeId = "challengeId must be a non-empty string when provided.";
+    } else {
+      challengeId = body.challengeId.trim();
+    }
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { request: null, fieldErrors };
+  }
+
+  return {
+    request: {
+      userId,
+      challengeId,
+      events,
+    },
+    fieldErrors,
+  };
+}
+
+function parseDeleteBiometricsRequest(body: unknown): {
+  request: DeleteBiometricsRequest | null;
+  fieldErrors: Record<string, string>;
+} {
+  const fieldErrors: Record<string, string> = {};
+  if (!isRecord(body)) {
+    fieldErrors.body = "Request body must be an object.";
+    return { request: null, fieldErrors };
+  }
+
+  const userId = readRequiredStringField(body, "userId", fieldErrors);
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { request: null, fieldErrors };
+  }
+
+  return {
+    request: { userId },
+    fieldErrors,
+  };
+}
+
+function sendValidationError(
+  res: Response,
+  message: string,
+  fieldErrors: Record<string, string> = {}
+): void {
+  const details = Object.keys(fieldErrors).length > 0 ? { fieldErrors } : undefined;
+  const error: VerifyError = details
+    ? { code: "VALIDATION_ERROR", message, details }
+    : { code: "VALIDATION_ERROR", message };
+
+  res.status(400).json(makeError(error));
+}
+
+function sendInternalError(res: Response, message: string, details?: unknown): void {
+  const error: VerifyError =
+    details === undefined
+      ? { code: "INTERNAL_ERROR", message }
+      : { code: "INTERNAL_ERROR", message, details };
+  res.status(500).json(makeError(error));
+}
+
+function sendConsentRequired(res: Response): void {
+  res.status(403).json(
+    makeError({
+      code: "CONSENT_REQUIRED",
+      message: "Consent required before enrollment.",
+    })
+  );
+}
+
+function buildEmptyProfiles(userId: string, nowIso: string): UserProfiles {
+  return {
+    userId,
+    keystroke: null,
+    faceEmbedding: null,
+    voiceEmbedding: null,
+    updatedAt: nowIso,
+  };
 }
 
 async function resolveNetworkCheck(args: {
@@ -338,9 +560,183 @@ function mapLocationToLegacyResult(args: {
 export function createApp(deps: CreateAppDeps = {}) {
   const app = express();
   const runIpCheck = deps.runIpCheck ?? defaultRunIpCheck;
+  const sessionStore = deps.sessionStore ?? new InMemorySessionStore();
+  const challengeStore = deps.challengeStore ?? new InMemoryChallengeStore();
+  const storage = deps.storage ?? new InMemoryAdapter();
+  const challengeRng = deps.challengeRng ?? (() => Math.random());
+  const nowFn = deps.nowFn ?? (() => Date.now());
+  const nowFnIso = deps.nowFnIso ?? (() => new Date().toISOString());
+  const challengeTtlMs = resolveChallengeTtlMs(deps.challengeTtlSeconds);
 
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
+  app.use(createSessionRouter({ sessionStore }));
+  app.use(
+    createChallengeRouter({
+      challengeStore,
+      rng: challengeRng,
+      nowFn,
+      ttlMs: challengeTtlMs,
+    })
+  );
+
+  app.post("/consent", async (req: Request, res: Response) => {
+    const { request: parsed, fieldErrors } = parseConsentRequest(req.body);
+    if (!parsed) {
+      sendValidationError(res, "Invalid consent request.", fieldErrors);
+      return;
+    }
+
+    const grantedAt = nowFnIso();
+    const log: ConsentLog = {
+      userId: parsed.userId,
+      consentVersion: parsed.consentVersion,
+      grantedAt,
+    };
+
+    try {
+      await storage.appendConsentLog(log);
+
+      const response: ConsentResponse = {
+        ok: true,
+        userId: parsed.userId,
+        consentVersion: parsed.consentVersion,
+        grantedAt,
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      sendInternalError(
+        res,
+        "Failed to persist consent.",
+        error instanceof Error ? error.message : error
+      );
+    }
+  });
+
+  app.post("/enroll/keystroke", async (req: Request, res: Response) => {
+    const { request: parsed, fieldErrors } = parseEnrollKeystrokeRequest(req.body);
+    if (!parsed) {
+      sendValidationError(res, "Invalid keystroke enrollment request.", fieldErrors);
+      return;
+    }
+
+    try {
+      const latestConsent = await storage.getLatestConsent(parsed.userId);
+      if (!latestConsent) {
+        sendConsentRequired(res);
+        return;
+      }
+
+      const nowIso = nowFnIso();
+      const computedProfile = buildKeystrokeProfile({
+        userId: parsed.userId,
+        nowIso,
+        events: parsed.events,
+      });
+
+      const existingProfiles = await storage.getProfiles(parsed.userId);
+      const existingCreatedAt = existingProfiles?.keystroke?.createdAt;
+      const profile: KeystrokeProfile = existingCreatedAt
+        ? {
+            ...computedProfile,
+            createdAt: existingCreatedAt,
+            updatedAt: nowIso,
+          }
+        : computedProfile;
+
+      const nextProfiles: UserProfiles = {
+        userId: parsed.userId,
+        keystroke: profile,
+        faceEmbedding: existingProfiles?.faceEmbedding ?? null,
+        voiceEmbedding: existingProfiles?.voiceEmbedding ?? null,
+        updatedAt: nowIso,
+      };
+
+      await storage.saveProfiles(parsed.userId, nextProfiles);
+
+      const response: EnrollKeystrokeResponse = {
+        ok: true,
+        profile,
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      sendInternalError(
+        res,
+        "Failed to enroll keystroke profile.",
+        error instanceof Error ? error.message : error
+      );
+    }
+  });
+
+  app.get("/user/:userId/profiles", async (req: Request, res: Response) => {
+    const userId = typeof req.params.userId === "string" ? req.params.userId.trim() : "";
+    if (!userId) {
+      sendValidationError(res, "Invalid user profile request.", {
+        userId: "userId is required.",
+      });
+      return;
+    }
+
+    try {
+      const profiles = (await storage.getProfiles(userId)) ?? buildEmptyProfiles(userId, nowFnIso());
+      const response: GetProfilesResponse = {
+        ok: true,
+        profiles,
+      };
+      res.status(200).json(response);
+    } catch (error) {
+      sendInternalError(
+        res,
+        "Failed to read user profiles.",
+        error instanceof Error ? error.message : error
+      );
+    }
+  });
+
+  app.delete("/user/biometrics", async (req: Request, res: Response) => {
+    const { request: parsed, fieldErrors } = parseDeleteBiometricsRequest(req.body);
+    if (!parsed) {
+      sendValidationError(res, "Invalid delete biometrics request.", fieldErrors);
+      return;
+    }
+
+    const deleteConsentRaw = req.query.deleteConsent;
+    const deleteConsent =
+      typeof deleteConsentRaw === "string"
+        ? deleteConsentRaw.toLowerCase() === "true"
+        : Array.isArray(deleteConsentRaw)
+          ? deleteConsentRaw.some((value) => String(value).toLowerCase() === "true")
+          : false;
+
+    try {
+      await storage.deleteProfiles(parsed.userId);
+
+      if (deleteConsent) {
+        const storageWithDeleteConsent = storage as StorageAdapter & {
+          deleteConsentLogs?: (userId: string) => Promise<void>;
+        };
+
+        if (typeof storageWithDeleteConsent.deleteConsentLogs === "function") {
+          await storageWithDeleteConsent.deleteConsentLogs(parsed.userId);
+        }
+      }
+
+      const response: DeleteBiometricsResponse = {
+        ok: true,
+        userId: parsed.userId,
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      sendInternalError(
+        res,
+        "Failed to delete biometrics.",
+        error instanceof Error ? error.message : error
+      );
+    }
+  });
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ ok: true });

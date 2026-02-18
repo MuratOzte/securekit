@@ -47,6 +47,16 @@ export class HttpTransport {
     return this.handleResponse<T>(response);
   }
 
+  async delete<T>(path: string, body?: unknown): Promise<T> {
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
+    return this.handleResponse<T>(response);
+  }
+
   private async handleResponse<T>(response: Response): Promise<T> {
     const contentType = response.headers.get("content-type") || "";
     const isJson = contentType.includes("application/json");

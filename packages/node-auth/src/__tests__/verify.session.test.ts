@@ -1,0 +1,235 @@
+import request from "supertest";
+import type { LocationResult, NetworkResult } from "@securekit/core";
+import { describe, expect, it } from "vitest";
+import { createApp } from "../server";
+import { InMemorySessionStore } from "../session/inMemoryStore";
+
+const CLEAN_NETWORK: NetworkResult = {
+  ok: true,
+  score: 95,
+  flags: {
+    vpn: false,
+    tor: false,
+    proxy: false,
+    relay: false,
+    hosting: false,
+  },
+  reasons: [],
+  ipInfo: {
+    ip: "1.2.3.4",
+    countryCode: "TR",
+    timezoneOffsetMin: 180,
+    clientOffsetMin: 180,
+    driftMin: 0,
+  },
+};
+
+const CLEAN_LOCATION: LocationResult = {
+  ok: true,
+  countryCode: "TR",
+  allowed: true,
+  reasons: [],
+};
+
+const RISKY_NETWORK: NetworkResult = {
+  ok: true,
+  score: 20,
+  flags: {
+    vpn: true,
+    tor: true,
+    relay: true,
+    proxy: true,
+    hosting: true,
+  },
+  reasons: ["VPN", "TOR", "DRIFT_HIGH"],
+  ipInfo: {
+    ip: "5.6.7.8",
+    countryCode: "RU",
+    timezoneOffsetMin: 0,
+    clientOffsetMin: 180,
+    driftMin: 180,
+  },
+};
+
+const RISKY_LOCATION: LocationResult = {
+  ok: true,
+  countryCode: "RU",
+  allowed: false,
+  reasons: ["COUNTRY_NOT_ALLOWED"],
+};
+
+function createDeterministicApp(args?: { nowMs?: number; ttlMs?: number }) {
+  const nowRef = {
+    value: args?.nowMs ?? Date.UTC(2026, 0, 1, 10, 0, 0),
+  };
+
+  const sessionStore = new InMemorySessionStore({
+    nowFn: () => nowRef.value,
+    ttlMs: args?.ttlMs ?? 15 * 60 * 1000,
+  });
+
+  const app = createApp({ sessionStore });
+  return { app, nowRef };
+}
+
+async function startSession(app: ReturnType<typeof createDeterministicApp>["app"]): Promise<string> {
+  const response = await request(app).post("/session/start").send({});
+  expect(response.status).toBe(200);
+  expect(typeof response.body.sessionId).toBe("string");
+  return response.body.sessionId as string;
+}
+
+describe("verify session endpoint", () => {
+  it("returns SESSION_NOT_FOUND for unknown session", async () => {
+    const { app } = createDeterministicApp();
+    const response = await request(app).post("/verify/session").send({
+      sessionId: "unknown-session-id",
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({
+      error: { code: "SESSION_NOT_FOUND" },
+    });
+  });
+
+  it("returns allow decision on clean fixtures", async () => {
+    const { app } = createDeterministicApp();
+    const sessionId = await startSession(app);
+
+    const response = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: {
+        network: CLEAN_NETWORK,
+        location: CLEAN_LOCATION,
+      },
+      policy: {
+        allowedCountries: ["TR", "US"],
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.sessionId).toBe(sessionId);
+    expect(response.body.decision).toBe("allow");
+    expect(response.body.riskScore).toBeLessThanOrEqual(30);
+    expect(response.body.requiredSteps).toEqual([]);
+    expect(response.body.reasons).not.toContain("COUNTRY_NOT_ALLOWED");
+  });
+
+  it("returns step-up decision with keystroke step on risky fixtures", async () => {
+    const { app } = createDeterministicApp();
+    const sessionId = await startSession(app);
+
+    const response = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: {
+        network: RISKY_NETWORK,
+        location: RISKY_LOCATION,
+      },
+      policy: {
+        allowedCountries: ["TR"],
+        stepUpSteps: ["keystroke"],
+        allowMaxRisk: 30,
+        denyMinRisk: 85,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.decision).toBe("step-up");
+    expect(response.body.riskScore).toBeGreaterThan(30);
+    expect(response.body.riskScore).toBeLessThan(85);
+    expect(response.body.requiredSteps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          step: "keystroke",
+          ui: {
+            title: "Typing Check",
+            instruction: "Type the shown text naturally.",
+          },
+        }),
+      ])
+    );
+    expect(response.body.reasons).toEqual(
+      expect.arrayContaining(["COUNTRY_NOT_ALLOWED", "VPN_DETECTED"])
+    );
+  });
+
+  it("returns deny when treatVpnAsFailure is true", async () => {
+    const { app } = createDeterministicApp();
+    const sessionId = await startSession(app);
+
+    const response = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: {
+        network: RISKY_NETWORK,
+        location: CLEAN_LOCATION,
+      },
+      policy: {
+        allowMaxRisk: 30,
+        denyMinRisk: 85,
+        treatVpnAsFailure: true,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.decision).toBe("deny");
+    expect(response.body.reasons).toContain("VPN_TREATED_AS_FAILURE");
+  });
+
+  it("returns SESSION_EXPIRED for expired sessions", async () => {
+    const { app, nowRef } = createDeterministicApp({ ttlMs: 1000 });
+    const sessionId = await startSession(app);
+
+    nowRef.value += 2_000;
+
+    const response = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: {
+        network: CLEAN_NETWORK,
+      },
+    });
+
+    expect(response.status).toBe(410);
+    expect(response.body).toMatchObject({
+      error: { code: "SESSION_EXPIRED" },
+    });
+  });
+
+  it("persists signals across verify/session calls", async () => {
+    const { app } = createDeterministicApp();
+    const sessionId = await startSession(app);
+
+    const first = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: { network: CLEAN_NETWORK },
+    });
+    expect(first.status).toBe(200);
+    expect(first.body.signalsUsed.network).toMatchObject({
+      ipInfo: { ip: "1.2.3.4" },
+    });
+    expect(first.body.signalsUsed.location).toBeUndefined();
+
+    const second = await request(app).post("/verify/session").send({
+      sessionId,
+      signals: { location: CLEAN_LOCATION },
+      policy: { allowedCountries: ["TR"] },
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.signalsUsed.network).toMatchObject({
+      ipInfo: { ip: "1.2.3.4" },
+    });
+    expect(second.body.signalsUsed.location).toMatchObject({
+      countryCode: "TR",
+    });
+
+    const third = await request(app).post("/verify/session").send({
+      sessionId,
+    });
+    expect(third.status).toBe(200);
+    expect(third.body.signalsUsed.network).toMatchObject({
+      ipInfo: { ip: "1.2.3.4" },
+    });
+    expect(third.body.signalsUsed.location).toMatchObject({
+      countryCode: "TR",
+    });
+  });
+});

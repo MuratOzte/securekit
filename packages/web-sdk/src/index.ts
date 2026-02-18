@@ -1,4 +1,19 @@
-import type { LocationResult, NetworkResult } from "@securekit/core";
+import type {
+  ChallengeTextRequest,
+  ChallengeTextResponse,
+  ConsentRequest,
+  ConsentResponse,
+  DeleteBiometricsResponse,
+  EnrollKeystrokeRequest,
+  EnrollKeystrokeResponse,
+  GetProfilesResponse,
+  LocationResult,
+  NetworkResult,
+  SessionPolicy,
+  SessionStartResponse,
+  VerifySessionRequest,
+  VerifySessionResponse,
+} from "@securekit/core";
 import {
   HttpTransport,
   HttpError,
@@ -6,10 +21,29 @@ import {
 } from "./transport";
 
 export type {
+  ChallengeLang,
+  ChallengeLength,
+  ChallengeTextRequest,
+  ChallengeTextResponse,
+  ConsentRequest,
+  ConsentResponse,
+  ConsumeChallengeRequest,
+  ConsumeChallengeResponse,
+  DeleteBiometricsResponse,
   LocationResult,
+  EnrollKeystrokeRequest,
+  EnrollKeystrokeResponse,
+  GetProfilesResponse,
+  RequiredStep,
+  RiskDecision,
   NetworkFlags,
   NetworkIpInfo,
   NetworkResult,
+  SessionPolicy,
+  SessionStartResponse,
+  VerifySessionRequest,
+  VerifySessionResponse,
+  VerifyStep,
   VerifyError,
 } from "@securekit/core";
 export { HttpTransport, HttpError } from "./transport";
@@ -211,6 +245,46 @@ export class SecureKitClient {
       : {};
 
     return this.transport.post<LocationResult>("/verify/location", body);
+  }
+
+  async getTextChallenge(options: ChallengeTextRequest = {}): Promise<ChallengeTextResponse> {
+    const body = {
+      lang: options.lang,
+      length: options.length,
+      sessionId: options.sessionId,
+    };
+
+    return this.transport.post<ChallengeTextResponse>("/challenge/text", body);
+  }
+
+  async startSession(): Promise<SessionStartResponse> {
+    return this.transport.post<SessionStartResponse>("/session/start");
+  }
+
+  async verifySession(args: {
+    sessionId: string;
+    policy?: SessionPolicy;
+    signals?: VerifySessionRequest["signals"];
+  }): Promise<VerifySessionResponse> {
+    return this.transport.post<VerifySessionResponse>("/verify/session", args);
+  }
+
+  async grantConsent(args: ConsentRequest): Promise<ConsentResponse> {
+    return this.transport.post<ConsentResponse>("/consent", args);
+  }
+
+  async enrollKeystroke(args: EnrollKeystrokeRequest): Promise<EnrollKeystrokeResponse> {
+    return this.transport.post<EnrollKeystrokeResponse>("/enroll/keystroke", args);
+  }
+
+  async getProfiles(userId: string): Promise<GetProfilesResponse> {
+    return this.transport.get<GetProfilesResponse>(`/user/${encodeURIComponent(userId)}/profiles`);
+  }
+
+  async deleteBiometrics(userId: string): Promise<DeleteBiometricsResponse> {
+    return this.transport.delete<DeleteBiometricsResponse>("/user/biometrics", {
+      userId,
+    });
   }
 
   /** @deprecated Use verifyNetwork instead. */

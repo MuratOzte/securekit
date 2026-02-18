@@ -1,11 +1,24 @@
 export * from "./contracts";
 export * from "./contracts/verify";
+export * from "./contracts/session";
+export * from "./contracts/consent";
+export * from "./contracts/enrollment";
+export * from "./contracts/userProfiles";
+export type {
+  ChallengeLang,
+  ChallengeLength,
+  ChallengeTextRequest,
+  ChallengeTextResponse,
+  ConsumeChallengeRequest,
+  ConsumeChallengeResponse,
+} from "./contracts/challenge";
+export * from "./biometrics/keystrokeProfile";
 export * from "./orchestrator";
 export * from "./policies.defaultPolicy";
+export * from "./risk/aggregate";
+export * from "./risk/decide";
+export * from "./risk/policy";
 
-// packages/core/src/index.ts
-
-// Kullanacagimiz faktor ID'leri
 export const FACTORS = {
   PASSKEY: "webauthn:passkey",
   FACE_LIVENESS: "face:liveness",
@@ -14,14 +27,12 @@ export const FACTORS = {
 
 export type FactorId = (typeof FACTORS)[keyof typeof FACTORS];
 
-// Ortak verification sonucu
 export interface VerificationResult {
   ok: boolean;
-  score: number; // 0.0 - 1.0
+  score: number;
   details?: Record<string, unknown>;
 }
 
-// Backend'in donebilecegi temel hata tipi (ileride kullanabiliriz)
 export interface VerificationError {
   code: string;
   message: string;
