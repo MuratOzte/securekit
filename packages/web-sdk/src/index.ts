@@ -1,539 +1,539 @@
-﻿// packages/web-sdk/src/index.ts
+import type { LocationResult, NetworkResult } from "@securekit/core";
+import {
+  HttpTransport,
+  HttpError,
+  type FetchLike,
+} from "./transport";
 
-// --------------------------------------------------
-// Temel tipler
-// --------------------------------------------------
+export type {
+  LocationResult,
+  NetworkFlags,
+  NetworkIpInfo,
+  NetworkResult,
+  VerifyError,
+} from "@securekit/core";
+export { HttpTransport, HttpError } from "./transport";
 
 export interface VerificationResult {
-    ok: boolean;
-    score: number;
-    details?: unknown;
+  ok: boolean;
+  score: number;
+  details?: unknown;
 }
 
-/**
- * /verify/vpn:check detayları – backend'deki VpnCheckResultDetails ile uyumlu
- */
 export interface VpnCheckDetails {
-    ip: string | null;
-    ipTimeZone: string | null;
-    ipCountry: string | null;
-    ipRegion: string | null;
-    isVpn: boolean;
-    isProxy: boolean;
-    isTor: boolean;
-    isRelay: boolean;
-    timezoneDriftHours: number | null;
-    clientTimeZone: string | null;
-    clientTimeOffsetMinutes: number | null;
-    source: string | null;
-    ipInfo?: unknown;
+  ip: string | null;
+  ipTimeZone: string | null;
+  ipCountry: string | null;
+  ipRegion: string | null;
+  isVpn: boolean;
+  isProxy: boolean;
+  isTor: boolean;
+  isRelay: boolean;
+  timezoneDriftHours: number | null;
+  clientTimeZone: string | null;
+  clientTimeOffsetMinutes: number | null;
+  source: string | null;
+  ipInfo?: unknown;
 }
 
-/**
- * /verify/location:country detayları – backend'deki LocationCountryResultDetails ile uyumlu
- */
 export interface LocationCountryResultDetails {
-    ip: string | null;
-    ipCountryCode: string | null;
-    expectedCountryCode: string | null;
-    clientCountryCode: string | null;
-    matchesExpectedCountry: boolean | null;
-    matchesClientCountry: boolean | null;
-    reason: string | null;
-    ipInfo?: unknown;
-    security?: {
-        vpn?: boolean | null;
-        proxy?: boolean | null;
-        tor?: boolean | null;
-        relay?: boolean | null;
-    };
+  ip: string | null;
+  ipCountryCode: string | null;
+  expectedCountryCode: string | null;
+  clientCountryCode: string | null;
+  matchesExpectedCountry: boolean | null;
+  matchesClientCountry: boolean | null;
+  reason: string | null;
+  ipInfo?: unknown;
+  security?: {
+    vpn?: boolean | null;
+    proxy?: boolean | null;
+    tor?: boolean | null;
+    relay?: boolean | null;
+  };
 }
 
-/**
- * /verify/location:country sonucu – backend cevabı
- */
 export interface LocationCountryResult {
-    ok: boolean;
-    score: number;
-    ipCountryCode: string | null;
-    expectedCountryCode: string | null;
-    clientCountryCode: string | null;
-    details?: LocationCountryResultDetails;
+  ok: boolean;
+  score: number;
+  ipCountryCode: string | null;
+  expectedCountryCode: string | null;
+  clientCountryCode: string | null;
+  details?: LocationCountryResultDetails;
 }
 
-// --------------------------------------------------
-// Politika yapı taşları
-// --------------------------------------------------
-
-/**
- * VPN politikası:
- * - allowVpn/proxy/tor/relay: false ise, ilgili flag true olduğunda direkt fail.
- * - minScore: backend score'u bu değerin altındaysa fail.
- */
 export interface VpnPolicyConfig {
-    allowVpn?: boolean; // varsayılan: undefined => sadece skora bak
-    allowProxy?: boolean; // varsayılan: undefined => sadece skora bak
-    allowTor?: boolean;
-    allowRelay?: boolean;
-    minScore?: number; // varsayılan: 0.5
+  allowVpn?: boolean;
+  allowProxy?: boolean;
+  allowTor?: boolean;
+  allowRelay?: boolean;
+  minScore?: number;
 }
 
-/**
- * Konum / ülke politikası:
- * - requireCountryMatch: true ise IP ülkesi expected veya client country ile
- *   uyuşmazsa fail.
- * - allowedCountries: sadece bu ülkelere izin ver (örn: ["TR", "DE"])
- * - minScore: backend score'u bu değerin altındaysa fail.
- * - treatVpnAsFailure: true ise, security.vpn/proxy/tor/relay'den biri true ise fail.
- */
 export interface LocationPolicyConfig {
-    requireCountryMatch?: boolean;
-    allowedCountries?: string[];
-    minScore?: number; // varsayılan: 0.5
-    treatVpnAsFailure?: boolean;
+  requireCountryMatch?: boolean;
+  allowedCountries?: string[];
+  minScore?: number;
+  treatVpnAsFailure?: boolean;
 }
 
-/**
- * Politika uygulandıktan sonra verilen karar
- */
 export interface PolicyDecision {
-    allowed: boolean;
-    reason: string; // örn: "ok", "vpn_not_allowed", "score_below_min"
-    effectiveScore: number; // politikanın değerlendirdiği score (genelde backend score)
+  allowed: boolean;
+  reason: string;
+  effectiveScore: number;
 }
 
-/**
- * Vpn sonucu + policy kararı
- */
 export interface VpnVerificationWithDecision {
-    raw: VerificationResult & { details?: VpnCheckDetails };
-    decision: PolicyDecision;
+  raw: VerificationResult & { details?: VpnCheckDetails };
+  decision: PolicyDecision;
 }
 
-/**
- * Location sonucu + policy kararı
- */
 export interface LocationVerificationWithDecision {
-    raw: LocationCountryResult;
-    decision: PolicyDecision;
+  raw: LocationCountryResult;
+  decision: PolicyDecision;
 }
 
-/**
- * Client konfigürasyonu – her uygulama kendi politikasını verebilir
- */
+export interface VerifyNetworkOptions {
+  clientOffsetMin?: number | null;
+}
+
+export interface VerifyLocationOptions {
+  allowedCountries?: string[];
+}
+
 export interface SecureKitClientOptions {
-    baseUrl: string; // ör: "http://localhost:3001"
-
-    // İsteğe bağlı global politikalar (override edilebilir)
-    vpnPolicy?: VpnPolicyConfig;
-    locationPolicy?: LocationPolicyConfig;
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+  vpnPolicy?: VpnPolicyConfig;
+  locationPolicy?: LocationPolicyConfig;
 }
-
-// --------------------------------------------------
-// Yardımcı fonksiyonlar
-// --------------------------------------------------
 
 function normalizeCountryCode(code: string | null | undefined): string | null {
-    if (!code) return null;
-    const trimmed = code.trim();
-    if (!trimmed) return null;
-    return trimmed.toUpperCase();
+  if (!code) return null;
+  const trimmed = code.trim();
+  if (!trimmed) return null;
+  return trimmed.toUpperCase();
 }
 
-// --------------------------------------------------
-// Ana client
-// --------------------------------------------------
+function getLocationFromRaw(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const candidate = (raw as { location?: unknown }).location;
+  if (!candidate || typeof candidate !== "object") return {};
+  return candidate as Record<string, unknown>;
+}
+
+function computeLegacyLocationScore(args: {
+  ipCountryCode: string | null;
+  expectedCountryCode: string | null;
+  clientCountryCode: string | null;
+  network: NetworkResult;
+}): { score: number; reason: string | null } {
+  const { ipCountryCode, expectedCountryCode, clientCountryCode, network } = args;
+
+  const matchesExpectedCountry =
+    expectedCountryCode && ipCountryCode ? ipCountryCode === expectedCountryCode : null;
+
+  const matchesClientCountry =
+    clientCountryCode && ipCountryCode ? ipCountryCode === clientCountryCode : null;
+
+  let score = 0.7;
+  let reason: string | null = "no_expected_country";
+
+  if (expectedCountryCode) {
+    if (matchesExpectedCountry === true) {
+      score = 1.0;
+      reason = "match_expected";
+    } else if (matchesExpectedCountry === false) {
+      score = 0.2;
+      reason = "expected_country_mismatch";
+    }
+  } else if (matchesClientCountry !== null) {
+    if (matchesClientCountry === true) {
+      score = 1.0;
+      reason = "match_client_country";
+    } else {
+      score = 0.2;
+      reason = "client_country_mismatch";
+    }
+  }
+
+  let penalty = 0;
+  if (network.flags.vpn) penalty += 0.4;
+  if (network.flags.proxy) penalty += 0.3;
+  if (network.flags.tor) penalty += 0.5;
+  if (network.flags.relay) penalty += 0.2;
+
+  score = Math.max(0, Math.min(1, score - penalty));
+
+  if (network.flags.vpn || network.flags.proxy || network.flags.tor || network.flags.relay) {
+    if (reason === "match_expected" || reason === "match_client_country") {
+      reason = "country_match_but_ip_security_risky";
+    } else if (!reason || reason === "no_expected_country") {
+      reason = "ip_security_risky";
+    }
+  }
+
+  return { score, reason };
+}
 
 export class SecureKitClient {
-    private baseUrl: string;
-    private vpnPolicy?: VpnPolicyConfig;
-    private locationPolicy?: LocationPolicyConfig;
+  private readonly transport: HttpTransport;
+  private readonly vpnPolicy?: VpnPolicyConfig;
+  private readonly locationPolicy?: LocationPolicyConfig;
 
-    constructor(options: SecureKitClientOptions) {
-        this.baseUrl = options.baseUrl.replace(/\/+$/, '');
-        this.vpnPolicy = options.vpnPolicy;
-        this.locationPolicy = options.locationPolicy;
-    }
+  constructor(options: SecureKitClientOptions) {
+    this.transport = new HttpTransport({
+      baseUrl: options.baseUrl,
+      fetchImpl: options.fetchImpl,
+    });
+    this.vpnPolicy = options.vpnPolicy;
+    this.locationPolicy = options.locationPolicy;
+  }
 
-    /**
-     * Basit health check
-     */
-    async health(): Promise<{ ok: boolean }> {
-        const res = await fetch(`${this.baseUrl}/health`);
-        if (!res.ok) {
-            throw new Error(`Health check failed: ${res.status}`);
-        }
-        return res.json();
-    }
+  async health(): Promise<{ ok: boolean }> {
+    return this.transport.get<{ ok: boolean }>("/health");
+  }
 
-    // --------------------------------------------------
-    // VPN CHECK – ham sonuç
-    // --------------------------------------------------
+  async verifyNetwork(options: VerifyNetworkOptions = {}): Promise<NetworkResult> {
+    const clientOffsetMin =
+      typeof options.clientOffsetMin === "number"
+        ? options.clientOffsetMin
+        : this.getClientOffsetMin();
 
-    /**
-     * VPN/proxy/Tor + timezone tutarlılığı kontrolü.
-     *
-     * SDK burada:
-     *  - clientTimeZone (örn: "Europe/Istanbul")
-     *  - clientTimeOffsetMinutes (UTC'den kaç dakika ileride/geride)
-     * hesaplayıp backend'e gönderir.
-     *
-     * Dönen değer backend'in ürettiği ham skordur (henüz politika uygulanmamış).
-     */
-    async verifyVpn(): Promise<
-        VerificationResult & { details?: VpnCheckDetails }
-    > {
-        const clientTimeZone =
-            Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+    return this.transport.post<NetworkResult>("/verify/network", {
+      clientOffsetMin,
+    });
+  }
 
-        // JS: getTimezoneOffset() "kaç dakika GERİDESİN" diye verir (İstanbul için +180).
-        // Backend ile uyum için işaretini çeviriyoruz:
-        //   İstanbul (UTC+3) => clientTimeOffsetMinutes = 180
-        const clientTimeOffsetMinutes = -new Date().getTimezoneOffset();
+  async verifyLocation(options: VerifyLocationOptions = {}): Promise<LocationResult> {
+    const body = options.allowedCountries
+      ? { allowedCountries: options.allowedCountries }
+      : {};
 
-        const res = await fetch(`${this.baseUrl}/verify/vpn:check`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                clientTimeZone,
-                clientTimeOffsetMinutes,
-            }),
-        });
+    return this.transport.post<LocationResult>("/verify/location", body);
+  }
 
-        if (!res.ok) {
-            throw new Error(`VPN check failed: ${res.status}`);
-        }
+  /** @deprecated Use verifyNetwork instead. */
+  async verifyVpn(): Promise<VerificationResult & { details?: VpnCheckDetails }> {
+    const clientTimeZone = this.getClientTimeZone();
+    const clientTimeOffsetMinutes = this.getClientOffsetMin();
 
-        return res.json();
-    }
+    const network = await this.verifyNetwork({
+      clientOffsetMin: clientTimeOffsetMinutes,
+    });
 
-    /**
-     * VPN check + politika kararı birlikte:
-     *
-     *  const { raw, decision } = await client.verifyVpnWithPolicy({
-     *    allowVpn: false,
-     *    allowProxy: true,
-     *    allowTor: false,
-     *    minScore: 0.6,
-     *  });
-     */
-    async verifyVpnWithPolicy(
-        policyOverride?: VpnPolicyConfig
-    ): Promise<VpnVerificationWithDecision> {
-        const raw = await this.verifyVpn();
-        const mergedPolicy: VpnPolicyConfig = {
-            ...(this.vpnPolicy ?? {}),
-            ...(policyOverride ?? {}),
-        };
-        const decision = this.evaluateVpnPolicy(raw, mergedPolicy);
-        return { raw, decision };
-    }
+    const location = getLocationFromRaw(network.raw);
 
-    private evaluateVpnPolicy(
-        result: VerificationResult & { details?: VpnCheckDetails },
-        policy?: VpnPolicyConfig
-    ): PolicyDecision {
-        const minScore = policy?.minScore ?? 0.5;
-        const details = (result.details ?? {}) as VpnCheckDetails;
+    return {
+      ok: network.ok,
+      score: network.score,
+      details: {
+        ip: network.ipInfo.ip ?? null,
+        ipTimeZone:
+          typeof location.time_zone === "string" ? (location.time_zone as string) : null,
+        ipCountry: network.ipInfo.countryCode ?? null,
+        ipRegion:
+          typeof location.region === "string"
+            ? (location.region as string)
+            : typeof location.city === "string"
+              ? (location.city as string)
+              : null,
+        isVpn: network.flags.vpn === true,
+        isProxy: network.flags.proxy === true,
+        isTor: network.flags.tor === true,
+        isRelay: network.flags.relay === true,
+        timezoneDriftHours:
+          typeof network.ipInfo.driftMin === "number"
+            ? network.ipInfo.driftMin / 60
+            : null,
+        clientTimeZone,
+        clientTimeOffsetMinutes,
+        source: "vpnapi.io+ip_check.py",
+        ipInfo: network.raw ?? null,
+      },
+    };
+  }
 
-        const isVpn = !!details.isVpn;
-        const isProxy = !!details.isProxy;
-        const isTor = !!details.isTor;
-        const isRelay = !!details.isRelay;
+  async verifyVpnWithPolicy(
+    policyOverride?: VpnPolicyConfig
+  ): Promise<VpnVerificationWithDecision> {
+    const raw = await this.verifyVpn();
+    const mergedPolicy: VpnPolicyConfig = {
+      ...(this.vpnPolicy ?? {}),
+      ...(policyOverride ?? {}),
+    };
+    const decision = this.evaluateVpnPolicy(raw, mergedPolicy);
+    return { raw, decision };
+  }
 
-        // Politika: VPN/Proxy/Tor/Relay yasak mı?
-        if (policy) {
-            if (policy.allowVpn === false && isVpn) {
-                return {
-                    allowed: false,
-                    reason: 'vpn_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-            if (policy.allowProxy === false && isProxy) {
-                return {
-                    allowed: false,
-                    reason: 'proxy_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-            if (policy.allowTor === false && isTor) {
-                return {
-                    allowed: false,
-                    reason: 'tor_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-            if (policy.allowRelay === false && isRelay) {
-                return {
-                    allowed: false,
-                    reason: 'relay_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-        }
+  private evaluateVpnPolicy(
+    result: VerificationResult & { details?: VpnCheckDetails },
+    policy?: VpnPolicyConfig
+  ): PolicyDecision {
+    const minScore = policy?.minScore ?? 0.5;
+    const details = result.details;
 
-        // Score eşiği
-        if (result.score < minScore) {
-            return {
-                allowed: false,
-                reason: 'score_below_min',
-                effectiveScore: result.score,
-            };
-        }
+    const isVpn = details?.isVpn === true;
+    const isProxy = details?.isProxy === true;
+    const isTor = details?.isTor === true;
+    const isRelay = details?.isRelay === true;
 
+    if (policy) {
+      if (policy.allowVpn === false && isVpn) {
         return {
-            allowed: true,
-            reason: 'ok',
-            effectiveScore: result.score,
+          allowed: false,
+          reason: "vpn_not_allowed",
+          effectiveScore: result.score,
         };
-    }
-
-    // --------------------------------------------------
-    // LOCATION:COUNTRY – ham sonuçlar
-    // --------------------------------------------------
-
-    /**
-     * Navigator'dan otomatik ülke kodu tahmini ile location-country kontrolü.
-     *
-     * Örn:
-     *  - navigator.language "tr-TR" ise => "TR"
-     *  - navigator.language "tr" ise   => "TR" varsayımı
-     *
-     * Elde edilen ülke kodu, expectedCountryCode parametresi verilmemişse
-     * hem expectedCountryCode hem clientCountryCode olarak backend'e gider.
-     */
-    async verifyLocationCountryAuto(): Promise<LocationCountryResult> {
-        const autoCountry = this.getNavigatorCountryCode();
-        return this.verifyLocationCountry(autoCountry ?? undefined);
-    }
-
-    /**
-     * Elle beklenen ülke kodu vererek location-country kontrolü.
-     *
-     * Örn:
-     *  await client.verifyLocationCountry("TR")
-     *
-     * Backend'e:
-     *  - expectedCountryCode: parametre
-     *  - clientCountryCode: navigator'dan tahmin (varsa)
-     * gönderilir.
-     */
-    async verifyLocationCountry(
-        expectedCountryCode?: string
-    ): Promise<LocationCountryResult> {
-        const navigatorCountry = this.getNavigatorCountryCode();
-
-        const body: {
-            expectedCountryCode: string | null;
-            clientCountryCode?: string | null;
-        } = {
-            expectedCountryCode: expectedCountryCode ?? null,
-        };
-
-        if (navigatorCountry) {
-            body.clientCountryCode = navigatorCountry;
-        }
-
-        const res = await fetch(`${this.baseUrl}/verify/location:country`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-
-        if (!res.ok) {
-            throw new Error(`Location country check failed: ${res.status}`);
-        }
-
-        return res.json();
-    }
-
-    /**
-     * Location-country + politika kararı birlikte:
-     *
-     *  const { raw, decision } =
-     *    await client.verifyLocationCountryWithPolicy("TR", {
-     *      requireCountryMatch: true,
-     *      allowedCountries: ["TR", "DE"],
-     *      minScore: 0.6,
-     *      treatVpnAsFailure: true,
-     *    });
-     */
-    async verifyLocationCountryWithPolicy(
-        expectedCountryCode?: string,
-        policyOverride?: LocationPolicyConfig
-    ): Promise<LocationVerificationWithDecision> {
-        const raw = await this.verifyLocationCountry(expectedCountryCode);
-        const mergedPolicy: LocationPolicyConfig = {
-            ...(this.locationPolicy ?? {}),
-            ...(policyOverride ?? {}),
-        };
-        const decision = this.evaluateLocationPolicy(raw, mergedPolicy);
-        return { raw, decision };
-    }
-
-    private evaluateLocationPolicy(
-        result: LocationCountryResult,
-        policy?: LocationPolicyConfig
-    ): PolicyDecision {
-        const minScore = policy?.minScore ?? 0.5;
-        const details = result.details;
-
-        const ipCountry = normalizeCountryCode(result.ipCountryCode);
-        const expected = normalizeCountryCode(
-            result.expectedCountryCode ??
-                details?.expectedCountryCode ??
-                undefined
-        );
-        const client = normalizeCountryCode(
-            result.clientCountryCode ?? details?.clientCountryCode ?? undefined
-        );
-
-        // 1) Ülke eşleşmesi zorunlu mu?
-        if (policy?.requireCountryMatch) {
-            // Öncelik expectedCountryCode
-            if (expected && ipCountry && ipCountry !== expected) {
-                return {
-                    allowed: false,
-                    reason: 'ip_country_mismatch_expected',
-                    effectiveScore: result.score,
-                };
-            }
-            // expected yoksa clientCountry'ye göre değerlendir
-            if (!expected && client && ipCountry && ipCountry !== client) {
-                return {
-                    allowed: false,
-                    reason: 'ip_country_mismatch_client',
-                    effectiveScore: result.score,
-                };
-            }
-        }
-
-        // 2) Sadece belirli ülkelere izin ver
-        if (policy?.allowedCountries && ipCountry) {
-            const allowedNormalized = policy.allowedCountries
-                .map((c) => normalizeCountryCode(c))
-                .filter((c): c is string => !!c);
-
-            if (
-                allowedNormalized.length > 0 &&
-                !allowedNormalized.includes(ipCountry)
-            ) {
-                return {
-                    allowed: false,
-                    reason: 'ip_country_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-        }
-
-        // 3) VPN / proxy / tor riskini politika seviyesinde deny yap
-        if (policy?.treatVpnAsFailure && details?.security) {
-            const s = details.security;
-            if (s.vpn || s.proxy || s.tor || s.relay) {
-                return {
-                    allowed: false,
-                    reason: 'ip_security_not_allowed',
-                    effectiveScore: result.score,
-                };
-            }
-        }
-
-        // 4) Score eşiği
-        if (result.score < minScore) {
-            return {
-                allowed: false,
-                reason: 'score_below_min',
-                effectiveScore: result.score,
-            };
-        }
-
+      }
+      if (policy.allowProxy === false && isProxy) {
         return {
-            allowed: true,
-            reason: 'ok',
-            effectiveScore: result.score,
+          allowed: false,
+          reason: "proxy_not_allowed",
+          effectiveScore: result.score,
         };
-    }
-
-    // --------------------------------------------------
-    // Diğer stub endpoint'ler
-    // --------------------------------------------------
-
-    /**
-     * WebAuthn / passkey doğrulaması – şimdilik backend stub
-     */
-    async verifyPasskey(proof: unknown): Promise<VerificationResult> {
-        const res = await fetch(`${this.baseUrl}/verify/webauthn:passkey`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ proof }),
-        });
-
-        if (!res.ok) {
-            throw new Error(`Passkey verify failed: ${res.status}`);
-        }
-
-        return res.json();
-    }
-
-    /**
-     * Face liveness doğrulaması – şimdilik backend stub
-     */
-    async verifyFaceLiveness(payload: {
-        proof?: { tasksOk?: boolean };
-        metrics?: { quality?: number };
-    }): Promise<VerificationResult> {
-        const res = await fetch(`${this.baseUrl}/verify/face:liveness`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            throw new Error(`Face liveness failed: ${res.status}`);
-        }
-
-        return res.json();
-    }
-
-    // --------------------------------------------------
-    // Navigator'dan ülke kodu çıkarma helper'ı
-    // --------------------------------------------------
-
-    /**
-     * Dil bilgisinden ülke kodu çıkar:
-     *  - "tr-TR"  -> "TR"
-     *  - "en-US"  -> "US"
-     *  - "tr"     -> "TR" (varsayım)
-     */
-    private getNavigatorCountryCode(): string | null {
-        if (typeof navigator === 'undefined') return null;
-
-        const anyNav = navigator as Navigator & {
-            language?: string;
-            languages?: string[];
+      }
+      if (policy.allowTor === false && isTor) {
+        return {
+          allowed: false,
+          reason: "tor_not_allowed",
+          effectiveScore: result.score,
         };
-
-        const lang =
-            anyNav.language ||
-            (Array.isArray(anyNav.languages) ? anyNav.languages[0] : undefined);
-
-        if (!lang || typeof lang !== 'string') return null;
-
-        // "tr-TR", "en-US" gibi ise
-        const parts = lang.split('-');
-        if (parts.length >= 2) {
-            const country = parts[1];
-            if (country && country.length >= 2) {
-                return country.toUpperCase();
-            }
-        }
-
-        // "tr", "en" gibi ise: 2 karakterli kodu ülke kodu say
-        if (lang.length === 2) {
-            return lang.toUpperCase();
-        }
-
-        return null;
+      }
+      if (policy.allowRelay === false && isRelay) {
+        return {
+          allowed: false,
+          reason: "relay_not_allowed",
+          effectiveScore: result.score,
+        };
+      }
     }
+
+    if (result.score < minScore) {
+      return {
+        allowed: false,
+        reason: "score_below_min",
+        effectiveScore: result.score,
+      };
+    }
+
+    return {
+      allowed: true,
+      reason: "ok",
+      effectiveScore: result.score,
+    };
+  }
+
+  /** @deprecated Use verifyLocation instead. */
+  async verifyLocationCountryAuto(): Promise<LocationCountryResult> {
+    const autoCountry = this.getNavigatorCountryCode();
+    return this.verifyLocationCountry(autoCountry ?? undefined);
+  }
+
+  /** @deprecated Use verifyLocation instead. */
+  async verifyLocationCountry(
+    expectedCountryCode?: string
+  ): Promise<LocationCountryResult> {
+    const normalizedExpected = normalizeCountryCode(expectedCountryCode ?? null);
+    const normalizedClient = normalizeCountryCode(this.getNavigatorCountryCode());
+
+    const allowedCountries = normalizedExpected
+      ? [normalizedExpected]
+      : normalizedClient
+        ? [normalizedClient]
+        : undefined;
+
+    const [location, network] = await Promise.all([
+      this.verifyLocation({ allowedCountries }),
+      this.verifyNetwork(),
+    ]);
+
+    const ipCountryCode = normalizeCountryCode(location.countryCode ?? null);
+    const matchesExpectedCountry =
+      normalizedExpected && ipCountryCode ? ipCountryCode === normalizedExpected : null;
+    const matchesClientCountry =
+      normalizedClient && ipCountryCode ? ipCountryCode === normalizedClient : null;
+
+    const { score, reason } = computeLegacyLocationScore({
+      ipCountryCode,
+      expectedCountryCode: normalizedExpected,
+      clientCountryCode: normalizedClient,
+      network,
+    });
+
+    return {
+      ok: score >= 0.5,
+      score,
+      ipCountryCode,
+      expectedCountryCode: normalizedExpected,
+      clientCountryCode: normalizedClient,
+      details: {
+        ip: network.ipInfo.ip ?? null,
+        ipCountryCode,
+        expectedCountryCode: normalizedExpected,
+        clientCountryCode: normalizedClient,
+        matchesExpectedCountry,
+        matchesClientCountry,
+        reason,
+        ipInfo: network.raw ?? null,
+        security: {
+          vpn: network.flags.vpn === true,
+          proxy: network.flags.proxy === true,
+          tor: network.flags.tor === true,
+          relay: network.flags.relay === true,
+        },
+      },
+    };
+  }
+
+  async verifyLocationCountryWithPolicy(
+    expectedCountryCode?: string,
+    policyOverride?: LocationPolicyConfig
+  ): Promise<LocationVerificationWithDecision> {
+    const raw = await this.verifyLocationCountry(expectedCountryCode);
+    const mergedPolicy: LocationPolicyConfig = {
+      ...(this.locationPolicy ?? {}),
+      ...(policyOverride ?? {}),
+    };
+    const decision = this.evaluateLocationPolicy(raw, mergedPolicy);
+    return { raw, decision };
+  }
+
+  private evaluateLocationPolicy(
+    result: LocationCountryResult,
+    policy?: LocationPolicyConfig
+  ): PolicyDecision {
+    const minScore = policy?.minScore ?? 0.5;
+    const details = result.details;
+
+    const ipCountry = normalizeCountryCode(result.ipCountryCode);
+    const expected = normalizeCountryCode(
+      result.expectedCountryCode ?? details?.expectedCountryCode ?? undefined
+    );
+    const client = normalizeCountryCode(
+      result.clientCountryCode ?? details?.clientCountryCode ?? undefined
+    );
+
+    if (policy?.requireCountryMatch) {
+      if (expected && ipCountry && ipCountry !== expected) {
+        return {
+          allowed: false,
+          reason: "ip_country_mismatch_expected",
+          effectiveScore: result.score,
+        };
+      }
+      if (!expected && client && ipCountry && ipCountry !== client) {
+        return {
+          allowed: false,
+          reason: "ip_country_mismatch_client",
+          effectiveScore: result.score,
+        };
+      }
+    }
+
+    if (policy?.allowedCountries && ipCountry) {
+      const allowedNormalized = policy.allowedCountries
+        .map((country) => normalizeCountryCode(country))
+        .filter((country): country is string => Boolean(country));
+
+      if (allowedNormalized.length > 0 && !allowedNormalized.includes(ipCountry)) {
+        return {
+          allowed: false,
+          reason: "ip_country_not_allowed",
+          effectiveScore: result.score,
+        };
+      }
+    }
+
+    if (policy?.treatVpnAsFailure && details?.security) {
+      const security = details.security;
+      if (security.vpn || security.proxy || security.tor || security.relay) {
+        return {
+          allowed: false,
+          reason: "ip_security_not_allowed",
+          effectiveScore: result.score,
+        };
+      }
+    }
+
+    if (result.score < minScore) {
+      return {
+        allowed: false,
+        reason: "score_below_min",
+        effectiveScore: result.score,
+      };
+    }
+
+    return {
+      allowed: true,
+      reason: "ok",
+      effectiveScore: result.score,
+    };
+  }
+
+  async verifyPasskey(proof: unknown): Promise<VerificationResult> {
+    try {
+      return await this.transport.post<VerificationResult>("/verify/webauthn:passkey", {
+        proof,
+      });
+    } catch (error) {
+      if (error instanceof HttpError) {
+        throw new Error(`Passkey verify failed: ${error.status}`);
+      }
+      throw error;
+    }
+  }
+
+  async verifyFaceLiveness(payload: {
+    proof?: { tasksOk?: boolean };
+    metrics?: { quality?: number };
+  }): Promise<VerificationResult> {
+    try {
+      return await this.transport.post<VerificationResult>("/verify/face:liveness", payload);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        throw new Error(`Face liveness failed: ${error.status}`);
+      }
+      throw error;
+    }
+  }
+
+  private getClientTimeZone(): string | null {
+    if (typeof Intl === "undefined") return null;
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+  }
+
+  private getClientOffsetMin(): number | null {
+    if (typeof Date === "undefined") return null;
+    return -new Date().getTimezoneOffset();
+  }
+
+  private getNavigatorCountryCode(): string | null {
+    if (typeof navigator === "undefined") return null;
+
+    const anyNav = navigator as Navigator & {
+      language?: string;
+      languages?: string[];
+    };
+
+    const lang =
+      anyNav.language ||
+      (Array.isArray(anyNav.languages) ? anyNav.languages[0] : undefined);
+
+    if (!lang || typeof lang !== "string") return null;
+
+    const parts = lang.split("-");
+    if (parts.length >= 2) {
+      const country = parts[1];
+      if (country && country.length >= 2) {
+        return country.toUpperCase();
+      }
+    }
+
+    if (lang.length === 2) {
+      return lang.toUpperCase();
+    }
+
+    return null;
+  }
 }

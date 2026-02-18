@@ -1,16 +1,11 @@
-// apps/demo-web/src/components/LocationCheckTester.tsx
-
 import React, { useState } from "react";
 import {
   checkLocationCountryWithPolicy,
-} from "../lib/secureKitClient.js"; // .js uzantısı önemli
-import type {
-  LocationVerificationWithDecision,
-} from "@securekit/web-sdk";
+  type LocationCheckWithDecision,
+} from "../lib/secureKitClient.js";
 
 export const LocationCheckTester: React.FC = () => {
-  const [result, setResult] =
-    useState<LocationVerificationWithDecision | null>(null);
+  const [result, setResult] = useState<LocationCheckWithDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -19,13 +14,11 @@ export const LocationCheckTester: React.FC = () => {
     setError(null);
     setResult(null);
     try {
-      // expectedCountryCode vermiyoruz => sadece navigator + IP + policy
       const res = await checkLocationCountryWithPolicy(undefined);
       setResult(res);
-      console.log("Auto + policy location check result:", res);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message ?? "Bilinmeyen hata");
+      setError(e instanceof Error ? e.message : "Bilinmeyen hata");
     } finally {
       setLoading(false);
     }
@@ -36,13 +29,11 @@ export const LocationCheckTester: React.FC = () => {
     setError(null);
     setResult(null);
     try {
-      // "TR" beklenen ülke + global default policy (allowedCountries: ['US'])
       const res = await checkLocationCountryWithPolicy("TR");
       setResult(res);
-      console.log("Manual (TR) + policy location check result:", res);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message ?? "Bilinmeyen hata");
+      setError(e instanceof Error ? e.message : "Bilinmeyen hata");
     } finally {
       setLoading(false);
     }
@@ -65,27 +56,24 @@ export const LocationCheckTester: React.FC = () => {
         <button onClick={handleManualTRWithPolicy} disabled={loading}>
           {loading
             ? "Kontrol ediliyor..."
-            : 'Manuel: expected "TR" + policy'}
+            : 'Manuel: allowed "TR" + policy'}
         </button>
       </div>
 
-      {error && (
-        <div style={{ color: "red", marginTop: 8 }}>Hata: {error}</div>
-      )}
+      {error && <div style={{ color: "red", marginTop: 8 }}>Hata: {error}</div>}
 
       {result && (
         <div style={{ marginTop: 8 }}>
-          <h3>Policy Kararı</h3>
+          <h3>Policy Karari</h3>
           <div>allowed: {String(decision?.allowed)}</div>
           <div>reason: {decision?.reason}</div>
           <div>effectiveScore: {decision?.effectiveScore}</div>
 
-          <h3 style={{ marginTop: 8 }}>Ham Sonuç (backend)</h3>
+          <h3 style={{ marginTop: 8 }}>Ham Sonuc (backend)</h3>
           <div>ok: {String(raw?.ok)}</div>
-          <div>score: {raw?.score}</div>
-          <div>ipCountryCode: {raw?.ipCountryCode}</div>
-          <div>expectedCountryCode: {raw?.expectedCountryCode}</div>
-          <div>clientCountryCode: {raw?.clientCountryCode}</div>
+          <div>allowed: {String(raw?.allowed)}</div>
+          <div>countryCode: {raw?.countryCode ?? "-"}</div>
+          <div>reasons: {(raw?.reasons ?? []).join(", ") || "-"}</div>
 
           <pre style={{ marginTop: 8, maxHeight: 300, overflow: "auto" }}>
             {JSON.stringify(result, null, 2)}

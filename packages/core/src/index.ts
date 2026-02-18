@@ -1,10 +1,11 @@
-﻿export * from "./contracts";
+export * from "./contracts";
+export * from "./contracts/verify";
 export * from "./orchestrator";
 export * from "./policies.defaultPolicy";
 
 // packages/core/src/index.ts
 
-// Kullanacağımız faktör ID'leri
+// Kullanacagimiz faktor ID'leri
 export const FACTORS = {
   PASSKEY: "webauthn:passkey",
   FACE_LIVENESS: "face:liveness",
@@ -20,7 +21,7 @@ export interface VerificationResult {
   details?: Record<string, unknown>;
 }
 
-// Backend’in dönebileceği temel hata tipi (ileride kullanabiliriz)
+// Backend'in donebilecegi temel hata tipi (ileride kullanabiliriz)
 export interface VerificationError {
   code: string;
   message: string;

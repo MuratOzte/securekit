@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@securekit/web-sdk",
   "version": "0.1.0",
   "private": true,
@@ -19,10 +19,12 @@
     "build": "tsup src/index.ts --format esm --dts",
     "dev": "tsup src/index.ts --format esm --dts --watch",
     "typecheck": "tsc -p tsconfig.json",
-    "lint": "echo \"(todo)\""
+    "lint": "echo \"(todo)\"",
+    "test": "vitest run"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
   }
 }

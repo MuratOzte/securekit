@@ -9,7 +9,8 @@
     "build": "npm run --workspaces build",
     "dev": "echo \"Use: npm run -w @securekit/node-auth dev  |  npm run -w demo-web dev\"",
     "lint": "echo \"(todo)\"",
-    "typecheck": "echo \"(todo)\""
+    "typecheck": "echo \"(todo)\"",
+    "test": "pnpm -r --filter @securekit/node-auth --filter @securekit/web-sdk test"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
