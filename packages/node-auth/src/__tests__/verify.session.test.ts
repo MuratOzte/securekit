@@ -58,6 +58,22 @@ const RISKY_LOCATION: LocationResult = {
   reasons: ["COUNTRY_NOT_ALLOWED"],
 };
 
+const BASELINE_KEYSTROKE_SAMPLE = {
+  events: [
+    { code: "KeyA", type: "down" as const, t: 0, expectedIndex: 0 },
+    { code: "KeyA", type: "up" as const, t: 95, expectedIndex: 0 },
+    { code: "KeyB", type: "down" as const, t: 140, expectedIndex: 1 },
+    { code: "KeyB", type: "up" as const, t: 225, expectedIndex: 1 },
+    { code: "KeyC", type: "down" as const, t: 270, expectedIndex: 2 },
+    { code: "KeyC", type: "up" as const, t: 360, expectedIndex: 2 },
+  ],
+  expectedText: "abc",
+  typedLength: 3,
+  errorCount: 0,
+  backspaceCount: 0,
+  source: "collector_v1" as const,
+};
+
 function createDeterministicApp(args?: { nowMs?: number; ttlMs?: number }) {
   const nowRef = {
     value: args?.nowMs ?? Date.UTC(2026, 0, 1, 10, 0, 0),
@@ -231,5 +247,53 @@ describe("verify session endpoint", () => {
     expect(third.body.signalsUsed.location).toMatchObject({
       countryCode: "TR",
     });
+  });
+
+  it("accepts optional keystroke signal in verify/session when policy enables it", async () => {
+    const { app } = createDeterministicApp();
+
+    await request(app).post("/consent").send({
+      userId: "u1",
+      consentVersion: "v1",
+    });
+
+    await request(app).post("/enroll/keystroke").send({
+      userId: "u1",
+      sample: BASELINE_KEYSTROKE_SAMPLE,
+      expectedText: "abc",
+      typedLength: 3,
+      errorCount: 0,
+      backspaceCount: 0,
+    });
+
+    const sessionId = await startSession(app);
+
+    const response = await request(app).post("/verify/session").send({
+      sessionId,
+      userId: "u1",
+      signals: {
+        network: CLEAN_NETWORK,
+        location: CLEAN_LOCATION,
+        keystroke: BASELINE_KEYSTROKE_SAMPLE,
+      },
+      policy: {
+        allowedCountries: ["TR"],
+        keystroke: {
+          enabled: true,
+          minEnrollmentRounds: 1,
+          minEnrollmentKeystrokes: 3,
+          minDigraphCount: 1,
+          allowThreshold: 0.5,
+          stepUpThreshold: 0.3,
+          denyThreshold: 0.2,
+        },
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.signalsUsed.keystroke).toMatchObject({
+      decision: "allow",
+    });
+    expect(response.body.decision).toBe("allow");
   });
 });

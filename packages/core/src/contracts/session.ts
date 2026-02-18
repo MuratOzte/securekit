@@ -1,4 +1,6 @@
 import type { LocationResult, NetworkResult } from "./verify";
+import type { KeystrokePolicy, KeystrokeSignal } from "./keystroke";
+import type { KeystrokeSample } from "./enrollment";
 
 export type RiskDecision = "allow" | "step-up" | "deny";
 
@@ -29,14 +31,17 @@ export type SessionPolicy = {
   treatVpnAsFailure?: boolean;
   allowedCountries?: string[];
   minNetworkScore?: number;
+  keystroke?: KeystrokePolicy;
 };
 
 export type VerifySessionRequest = {
   sessionId: string;
+  userId?: string;
   policy?: SessionPolicy;
   signals?: {
     network?: NetworkResult;
     location?: LocationResult;
+    keystroke?: KeystrokeSample;
   };
 };
 
@@ -49,6 +54,7 @@ export type VerifySessionResponse = {
   signalsUsed?: {
     network?: NetworkResult;
     location?: LocationResult;
+    keystroke?: KeystrokeSignal;
   };
 };
 

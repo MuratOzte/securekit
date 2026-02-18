@@ -7,10 +7,13 @@ import type {
   EnrollKeystrokeRequest,
   EnrollKeystrokeResponse,
   GetProfilesResponse,
+  KeystrokeSample,
   LocationResult,
   NetworkResult,
   SessionPolicy,
   SessionStartResponse,
+  VerifyKeystrokeRequest,
+  VerifyKeystrokeResponse,
   VerifySessionRequest,
   VerifySessionResponse,
 } from "@securekit/core";
@@ -30,6 +33,14 @@ export type {
   ConsumeChallengeRequest,
   ConsumeChallengeResponse,
   DeleteBiometricsResponse,
+  EnrollmentProgress,
+  KeystrokeDecision,
+  KeystrokeEvent,
+  KeystrokePolicy,
+  KeystrokeProfile,
+  KeystrokeSample,
+  KeystrokeSampleMetrics,
+  KeystrokeSignal,
   LocationResult,
   EnrollKeystrokeRequest,
   EnrollKeystrokeResponse,
@@ -41,12 +52,21 @@ export type {
   NetworkResult,
   SessionPolicy,
   SessionStartResponse,
+  VerifyKeystrokeRequest,
+  VerifyKeystrokeResponse,
   VerifySessionRequest,
   VerifySessionResponse,
   VerifyStep,
   VerifyError,
 } from "@securekit/core";
 export { HttpTransport, HttpError } from "./transport";
+export {
+  createKeystrokeCollector,
+  buildKeystrokeSample,
+  type BuildKeystrokeSampleOptions,
+  type KeystrokeCollectorOptions,
+  type KeystrokeCollectorSnapshot,
+} from "./keystroke";
 
 export interface VerificationResult {
   ok: boolean;
@@ -261,11 +281,7 @@ export class SecureKitClient {
     return this.transport.post<SessionStartResponse>("/session/start");
   }
 
-  async verifySession(args: {
-    sessionId: string;
-    policy?: SessionPolicy;
-    signals?: VerifySessionRequest["signals"];
-  }): Promise<VerifySessionResponse> {
+  async verifySession(args: VerifySessionRequest): Promise<VerifySessionResponse> {
     return this.transport.post<VerifySessionResponse>("/verify/session", args);
   }
 
@@ -275,6 +291,10 @@ export class SecureKitClient {
 
   async enrollKeystroke(args: EnrollKeystrokeRequest): Promise<EnrollKeystrokeResponse> {
     return this.transport.post<EnrollKeystrokeResponse>("/enroll/keystroke", args);
+  }
+
+  async verifyKeystroke(args: VerifyKeystrokeRequest): Promise<VerifyKeystrokeResponse> {
+    return this.transport.post<VerifyKeystrokeResponse>("/verify/keystroke", args);
   }
 
   async getProfiles(userId: string): Promise<GetProfilesResponse> {

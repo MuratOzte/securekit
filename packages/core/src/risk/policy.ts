@@ -7,7 +7,7 @@ type RequiredSessionPolicyKeys =
   | "treatVpnAsFailure";
 
 export type ResolvedSessionPolicy = Required<Pick<SessionPolicy, RequiredSessionPolicyKeys>> &
-  Pick<SessionPolicy, "allowedCountries" | "minNetworkScore">;
+  Pick<SessionPolicy, "allowedCountries" | "minNetworkScore" | "keystroke">;
 
 const DEFAULT_STEP_UP_STEPS: VerifyStep[] = ["keystroke"];
 
@@ -18,6 +18,9 @@ export const DEFAULT_SESSION_POLICY: ResolvedSessionPolicy = {
   treatVpnAsFailure: false,
   allowedCountries: undefined,
   minNetworkScore: undefined,
+  keystroke: {
+    enabled: false,
+  },
 };
 
 export function resolveSessionPolicy(policy?: SessionPolicy): ResolvedSessionPolicy {
@@ -35,5 +38,6 @@ export function resolveSessionPolicy(policy?: SessionPolicy): ResolvedSessionPol
     treatVpnAsFailure: policy.treatVpnAsFailure ?? DEFAULT_SESSION_POLICY.treatVpnAsFailure,
     allowedCountries: policy.allowedCountries,
     minNetworkScore: policy.minNetworkScore,
+    keystroke: policy.keystroke ?? DEFAULT_SESSION_POLICY.keystroke,
   };
 }

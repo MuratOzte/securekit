@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import express, { type Request, type Response } from "express";
 import type {
   LocationResult,
+  RequiredStep,
   SessionStartResponse,
   VerifyError,
   VerifySessionRequest,
@@ -10,8 +11,10 @@ import type {
 import { aggregateRisk } from "../../../core/src/risk/aggregate";
 import { decideNext } from "../../../core/src/risk/decide";
 import { resolveSessionPolicy } from "../../../core/src/risk/policy";
+import { verifyKeystrokeAgainstProfile } from "../services/keystrokeVerification";
 import type { SessionStore } from "../session/store";
 import type { SessionLookupResult, SessionRecord } from "../session/types";
+import type { StorageAdapter } from "../storage/adapter";
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 
@@ -129,6 +132,10 @@ function parseVerifySessionRequest(body: unknown): VerifySessionRequest | null {
 
   const request: VerifySessionRequest = { sessionId };
 
+  if (typeof body.userId === "string" && body.userId.trim().length > 0) {
+    request.userId = body.userId.trim();
+  }
+
   if (isObject(body.policy)) {
     request.policy = body.policy as VerifySessionRequest["policy"];
   }
@@ -145,6 +152,10 @@ function parseVerifySessionRequest(body: unknown): VerifySessionRequest | null {
       signals.location = body.signals.location as SessionSignals["location"];
     }
 
+    if (isObject(body.signals.keystroke)) {
+      signals.keystroke = body.signals.keystroke as SessionSignals["keystroke"];
+    }
+
     request.signals = signals;
   }
 
@@ -156,6 +167,7 @@ function mergeSignals(record: SessionRecord, request: VerifySessionRequest): Ses
     ...record.signals,
     ...(request.signals?.network ? { network: request.signals.network } : {}),
     ...(request.signals?.location ? { location: request.signals.location } : {}),
+    ...(request.signals?.keystroke ? { keystroke: request.signals.keystroke } : {}),
   };
 }
 
@@ -163,9 +175,25 @@ function uniq(values: string[]): string[] {
   return Array.from(new Set(values));
 }
 
-export function createSessionRouter(args: { sessionStore: SessionStore }) {
+function buildKeystrokeRequiredStep(): RequiredStep {
+  return {
+    step: "keystroke",
+    ui: {
+      title: "Typing Check",
+      instruction: "Type the shown text naturally.",
+    },
+  };
+}
+
+export function createSessionRouter(args: {
+  sessionStore: SessionStore;
+  storage?: StorageAdapter;
+  nowFnIso?: () => string;
+}) {
   const router = express.Router();
   const { sessionStore } = args;
+  const storage = args.storage;
+  const nowFnIso = args.nowFnIso ?? (() => new Date().toISOString());
 
   router.post("/session/start", async (_req: Request, res: Response) => {
     const nowMs = getNowMs(sessionStore);
@@ -227,7 +255,7 @@ export function createSessionRouter(args: { sessionStore: SessionStore }) {
     }
 
     const policy = resolveSessionPolicy(requestBody.policy);
-    const signalsUsed = {
+    const signalsUsed: VerifySessionResponse["signalsUsed"] = {
       network: updated.signals.network,
       location: applyAllowedCountries(updated.signals.location, policy.allowedCountries),
     };
@@ -238,17 +266,50 @@ export function createSessionRouter(args: { sessionStore: SessionStore }) {
       policy,
     });
 
-    const decision = decideNext({
+    const baselineDecision = decideNext({
       riskScore: aggregate.riskScore,
       policy,
     });
 
+    let finalDecision = baselineDecision.decision;
+    let requiredSteps = baselineDecision.requiredSteps;
+    const reasons = [...aggregate.reasons, ...baselineDecision.reasons];
+
+    if (policy.keystroke?.enabled && updated.signals.keystroke) {
+      if (!requestBody.userId) {
+        reasons.push("USER_ID_REQUIRED");
+      } else if (!storage) {
+        reasons.push("STORAGE_UNAVAILABLE");
+      } else {
+        const verification = await verifyKeystrokeAgainstProfile({
+          userId: requestBody.userId,
+          sample: updated.signals.keystroke,
+          storage,
+          policy: policy.keystroke,
+          nowIso: nowFnIso(),
+        });
+
+        signalsUsed.keystroke = verification.signal;
+        reasons.push(...verification.signal.reasons);
+
+        if (verification.signal.decision === "deny") {
+          finalDecision = "deny";
+          requiredSteps = [];
+          reasons.push("KEYSTROKE_DENY");
+        } else if (verification.signal.decision === "step_up" && finalDecision === "allow") {
+          finalDecision = "step-up";
+          requiredSteps = [buildKeystrokeRequiredStep()];
+          reasons.push("KEYSTROKE_STEP_UP");
+        }
+      }
+    }
+
     const response: VerifySessionResponse = {
       sessionId: updated.sessionId,
       riskScore: aggregate.riskScore,
-      decision: decision.decision,
-      requiredSteps: decision.requiredSteps,
-      reasons: uniq([...aggregate.reasons, ...decision.reasons]),
+      decision: finalDecision,
+      requiredSteps,
+      reasons: uniq(reasons),
       signalsUsed,
     };
 

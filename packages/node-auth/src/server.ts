@@ -8,6 +8,7 @@ import {
   type ConsentResponse,
   type DeleteBiometricsRequest,
   type DeleteBiometricsResponse,
+  type KeystrokeSample,
   type EnrollKeystrokeRequest,
   type EnrollKeystrokeResponse,
   type GetProfilesResponse,
@@ -16,15 +17,22 @@ import {
   type LocationResult,
   type NetworkResult,
   type UserProfiles,
+  type VerifyKeystrokeRequest,
+  type VerifyKeystrokeResponse,
   type VerifyError,
 } from "@securekit/core";
-import { buildKeystrokeProfile } from "../../core/src/biometrics/keystrokeProfile";
+import {
+  buildKeystrokeProfile,
+  DEFAULT_ENROLLMENT_MIN_KEYSTROKES,
+  DEFAULT_ENROLLMENT_MIN_ROUNDS,
+} from "../../core/src/biometrics/keystrokeProfile";
 import {
   runIpCheck as defaultRunIpCheck,
   type IpCheckOutput,
   type RunIpCheckParams,
 } from "./services/ipCheck";
 import { computeNetworkResult } from "./services/networkScore";
+import { verifyKeystrokeAgainstProfile } from "./services/keystrokeVerification";
 import { createSessionRouter } from "./routes/session";
 import { InMemorySessionStore } from "./session/inMemoryStore";
 import type { SessionStore } from "./session/store";
@@ -267,38 +275,71 @@ function parseConsentRequest(body: unknown): {
 function parseKeystrokeEvent(
   input: unknown,
   index: number,
-  fieldErrors: Record<string, string>
+  fieldErrors: Record<string, string>,
+  prefix = "events"
 ): KeystrokeEvent | null {
   if (!isRecord(input)) {
-    fieldErrors[`events[${index}]`] = "Each event must be an object.";
+    fieldErrors[`${prefix}[${index}]`] = "Each event must be an object.";
     return null;
   }
 
   const key = input.key;
-  if (typeof key !== "string" || key.trim().length === 0) {
-    fieldErrors[`events[${index}].key`] = "key must be a non-empty string.";
+  if (key !== undefined && (typeof key !== "string" || key.trim().length === 0)) {
+    fieldErrors[`${prefix}[${index}].key`] = "key must be a non-empty string when provided.";
+  }
+
+  const code = input.code;
+  if (code !== undefined && (typeof code !== "string" || code.trim().length === 0)) {
+    fieldErrors[`${prefix}[${index}].code`] = "code must be a non-empty string when provided.";
   }
 
   const type = input.type;
   const validType = type === "down" || type === "up";
   if (!validType) {
-    fieldErrors[`events[${index}].type`] = "type must be 'down' or 'up'.";
+    fieldErrors[`${prefix}[${index}].type`] = "type must be 'down' or 'up'.";
   }
 
   const t = input.t;
   const validTime = typeof t === "number" && Number.isFinite(t);
   if (!validTime) {
-    fieldErrors[`events[${index}].t`] = "t must be a finite number.";
+    fieldErrors[`${prefix}[${index}].t`] = "t must be a finite number.";
   }
 
-  if (typeof key !== "string" || key.trim().length === 0 || !validType || !validTime) {
+  const isRepeat = input.isRepeat;
+  if (isRepeat !== undefined && typeof isRepeat !== "boolean") {
+    fieldErrors[`${prefix}[${index}].isRepeat`] = "isRepeat must be a boolean when provided.";
+  }
+
+  const location = input.location;
+  if (location !== undefined && !(typeof location === "number" && Number.isFinite(location))) {
+    fieldErrors[`${prefix}[${index}].location`] = "location must be a finite number when provided.";
+  }
+
+  const expectedIndex = input.expectedIndex;
+  if (
+    expectedIndex !== undefined &&
+    !(typeof expectedIndex === "number" && Number.isFinite(expectedIndex) && Number.isInteger(expectedIndex))
+  ) {
+    fieldErrors[`${prefix}[${index}].expectedIndex`] =
+      "expectedIndex must be an integer when provided.";
+  }
+
+  if (!validType || !validTime) {
     return null;
   }
 
   return {
-    key: key.trim(),
+    ...(typeof key === "string" && key.trim().length > 0 ? { key: key.trim() } : {}),
+    ...(typeof code === "string" && code.trim().length > 0 ? { code: code.trim() } : {}),
     type: type as KeystrokeEvent["type"],
     t: t as number,
+    ...(typeof isRepeat === "boolean" ? { isRepeat } : {}),
+    ...(typeof location === "number" && Number.isFinite(location) ? { location } : {}),
+    ...((typeof expectedIndex === "number" &&
+      Number.isFinite(expectedIndex) &&
+      Number.isInteger(expectedIndex))
+      ? { expectedIndex }
+      : {}),
   };
 }
 
@@ -314,16 +355,67 @@ function parseEnrollKeystrokeRequest(body: unknown): {
 
   const userId = readRequiredStringField(body, "userId", fieldErrors);
 
-  if (!Array.isArray(body.events) || body.events.length === 0) {
-    fieldErrors.events = "events must be a non-empty array.";
-    return { request: null, fieldErrors };
+  const parseEvents = (value: unknown, fieldPath: string): KeystrokeEvent[] | null => {
+    if (!Array.isArray(value) || value.length === 0) {
+      fieldErrors[fieldPath] = `${fieldPath} must be a non-empty array.`;
+      return null;
+    }
+
+    const parsedEvents: KeystrokeEvent[] = [];
+    value.forEach((event, index) => {
+      const parsed = parseKeystrokeEvent(event, index, fieldErrors, fieldPath);
+      if (parsed) parsedEvents.push(parsed);
+    });
+
+    return parsedEvents;
+  };
+
+  let sample: KeystrokeSample | undefined;
+  if (body.sample !== undefined) {
+    if (!isRecord(body.sample)) {
+      fieldErrors.sample = "sample must be an object when provided.";
+    } else {
+      const sampleEvents = parseEvents(body.sample.events, "sample.events");
+      if (sampleEvents) {
+        sample = {
+          events: sampleEvents,
+        };
+
+        if (typeof body.sample.expectedText === "string") {
+          sample.expectedText = body.sample.expectedText;
+        }
+        if (typeof body.sample.challengeId === "string" && body.sample.challengeId.trim().length > 0) {
+          sample.challengeId = body.sample.challengeId.trim();
+        }
+        if (body.sample.source === "legacy" || body.sample.source === "collector_v1") {
+          sample.source = body.sample.source;
+        }
+        if (typeof body.sample.typedLength === "number" && Number.isFinite(body.sample.typedLength)) {
+          sample.typedLength = body.sample.typedLength;
+        }
+        if (typeof body.sample.errorCount === "number" && Number.isFinite(body.sample.errorCount)) {
+          sample.errorCount = body.sample.errorCount;
+        }
+        if (
+          typeof body.sample.backspaceCount === "number" &&
+          Number.isFinite(body.sample.backspaceCount)
+        ) {
+          sample.backspaceCount = body.sample.backspaceCount;
+        }
+        if (
+          typeof body.sample.ignoredEventCount === "number" &&
+          Number.isFinite(body.sample.ignoredEventCount)
+        ) {
+          sample.ignoredEventCount = body.sample.ignoredEventCount;
+        }
+        if (typeof body.sample.imeCompositionUsed === "boolean") {
+          sample.imeCompositionUsed = body.sample.imeCompositionUsed;
+        }
+      }
+    }
   }
 
-  const events: KeystrokeEvent[] = [];
-  body.events.forEach((event, index) => {
-    const parsed = parseKeystrokeEvent(event, index, fieldErrors);
-    if (parsed) events.push(parsed);
-  });
+  const events = sample?.events ?? parseEvents(body.events, "events") ?? [];
 
   let challengeId: string | undefined;
   if (body.challengeId !== undefined) {
@@ -342,7 +434,105 @@ function parseEnrollKeystrokeRequest(body: unknown): {
     request: {
       userId,
       challengeId,
-      events,
+      events: sample ? undefined : events,
+      ...(sample ? { sample } : {}),
+      ...(typeof body.expectedText === "string" ? { expectedText: body.expectedText } : {}),
+      ...(typeof body.typedLength === "number" && Number.isFinite(body.typedLength)
+        ? { typedLength: body.typedLength }
+        : {}),
+      ...(typeof body.errorCount === "number" && Number.isFinite(body.errorCount)
+        ? { errorCount: body.errorCount }
+        : {}),
+      ...(typeof body.backspaceCount === "number" && Number.isFinite(body.backspaceCount)
+        ? { backspaceCount: body.backspaceCount }
+        : {}),
+      ...(typeof body.imeCompositionUsed === "boolean"
+        ? { imeCompositionUsed: body.imeCompositionUsed }
+        : {}),
+    },
+    fieldErrors,
+  };
+}
+
+function parseVerifyKeystrokeRequest(body: unknown): {
+  request: VerifyKeystrokeRequest | null;
+  fieldErrors: Record<string, string>;
+} {
+  const fieldErrors: Record<string, string> = {};
+  if (!isRecord(body)) {
+    fieldErrors.body = "Request body must be an object.";
+    return { request: null, fieldErrors };
+  }
+
+  const userId = readRequiredStringField(body, "userId", fieldErrors);
+
+  if (!isRecord(body.sample)) {
+    fieldErrors.sample = "sample is required and must be an object.";
+    return { request: null, fieldErrors };
+  }
+
+  const sampleEvents: KeystrokeEvent[] = [];
+  if (!Array.isArray(body.sample.events) || body.sample.events.length === 0) {
+    fieldErrors["sample.events"] = "sample.events must be a non-empty array.";
+  } else {
+    body.sample.events.forEach((event, index) => {
+      const parsed = parseKeystrokeEvent(event, index, fieldErrors, "sample.events");
+      if (parsed) sampleEvents.push(parsed);
+    });
+  }
+
+  let policy: VerifyKeystrokeRequest["policy"] | undefined;
+  if (body.policy !== undefined) {
+    if (!isRecord(body.policy)) {
+      fieldErrors.policy = "policy must be an object when provided.";
+    } else {
+      policy = body.policy as VerifyKeystrokeRequest["policy"];
+    }
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { request: null, fieldErrors };
+  }
+
+  const sample: KeystrokeSample = {
+    events: sampleEvents,
+    ...(typeof body.sample.expectedText === "string" ? { expectedText: body.sample.expectedText } : {}),
+    ...(typeof body.sample.challengeId === "string" && body.sample.challengeId.trim().length > 0
+      ? { challengeId: body.sample.challengeId.trim() }
+      : {}),
+    ...(typeof body.sample.typedLength === "number" && Number.isFinite(body.sample.typedLength)
+      ? { typedLength: body.sample.typedLength }
+      : {}),
+    ...(typeof body.sample.errorCount === "number" && Number.isFinite(body.sample.errorCount)
+      ? { errorCount: body.sample.errorCount }
+      : {}),
+    ...(typeof body.sample.backspaceCount === "number" && Number.isFinite(body.sample.backspaceCount)
+      ? { backspaceCount: body.sample.backspaceCount }
+      : {}),
+    ...(typeof body.sample.ignoredEventCount === "number" &&
+    Number.isFinite(body.sample.ignoredEventCount)
+      ? { ignoredEventCount: body.sample.ignoredEventCount }
+      : {}),
+    ...(typeof body.sample.imeCompositionUsed === "boolean"
+      ? { imeCompositionUsed: body.sample.imeCompositionUsed }
+      : {}),
+    ...(typeof body.sample.source === "string" &&
+    (body.sample.source === "legacy" || body.sample.source === "collector_v1")
+      ? { source: body.sample.source }
+      : {}),
+  };
+
+  return {
+    request: {
+      userId,
+      ...(typeof body.sessionId === "string" && body.sessionId.trim().length > 0
+        ? { sessionId: body.sessionId.trim() }
+        : {}),
+      ...(typeof body.challengeId === "string" && body.challengeId.trim().length > 0
+        ? { challengeId: body.challengeId.trim() }
+        : {}),
+      sample,
+      ...(policy ? { policy } : {}),
     },
     fieldErrors,
   };
@@ -568,6 +758,15 @@ function mapLocationToLegacyResult(args: {
   };
 }
 
+function resolvePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.round(parsed);
+}
+
 export function createApp(deps: CreateAppDeps = {}) {
   const app = express();
   const runIpCheck = deps.runIpCheck ?? defaultRunIpCheck;
@@ -578,10 +777,24 @@ export function createApp(deps: CreateAppDeps = {}) {
   const nowFn = deps.nowFn ?? (() => Date.now());
   const nowFnIso = deps.nowFnIso ?? (() => new Date().toISOString());
   const challengeTtlMs = resolveChallengeTtlMs(deps.challengeTtlSeconds);
+  const enrollmentMinRounds = resolvePositiveIntEnv(
+    "KEYSTROKE_ENROLL_MIN_ROUNDS",
+    DEFAULT_ENROLLMENT_MIN_ROUNDS
+  );
+  const enrollmentMinKeystrokes = resolvePositiveIntEnv(
+    "KEYSTROKE_ENROLL_MIN_KEYSTROKES",
+    DEFAULT_ENROLLMENT_MIN_KEYSTROKES
+  );
 
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
-  app.use(createSessionRouter({ sessionStore }));
+  app.use(
+    createSessionRouter({
+      sessionStore,
+      storage,
+      nowFnIso,
+    })
+  );
   app.use(
     createChallengeRouter({
       challengeStore,
@@ -640,21 +853,25 @@ export function createApp(deps: CreateAppDeps = {}) {
       }
 
       const nowIso = nowFnIso();
-      const computedProfile = buildKeystrokeProfile({
+      const existingProfiles = await storage.getProfiles(parsed.userId);
+      const built = buildKeystrokeProfile({
         userId: parsed.userId,
         nowIso,
+        existingProfile: existingProfiles?.keystroke ?? null,
+        sample: parsed.sample,
         events: parsed.events,
+        expectedText: parsed.expectedText,
+        typedLength: parsed.typedLength,
+        errorCount: parsed.errorCount,
+        backspaceCount: parsed.backspaceCount,
+        imeCompositionUsed: parsed.imeCompositionUsed,
+        enrollmentTargets: {
+          minRounds: enrollmentMinRounds,
+          minKeystrokes: enrollmentMinKeystrokes,
+        },
       });
 
-      const existingProfiles = await storage.getProfiles(parsed.userId);
-      const existingCreatedAt = existingProfiles?.keystroke?.createdAt;
-      const profile: KeystrokeProfile = existingCreatedAt
-        ? {
-            ...computedProfile,
-            createdAt: existingCreatedAt,
-            updatedAt: nowIso,
-          }
-        : computedProfile;
+      const profile: KeystrokeProfile = built.profile;
 
       const nextProfiles: UserProfiles = {
         userId: parsed.userId,
@@ -669,6 +886,9 @@ export function createApp(deps: CreateAppDeps = {}) {
       const response: EnrollKeystrokeResponse = {
         ok: true,
         profile,
+        sampleMetrics: built.sampleMetrics,
+        enrollmentProgress: built.enrollmentProgress,
+        reasons: built.reasons,
       };
 
       res.status(200).json(response);
@@ -676,6 +896,47 @@ export function createApp(deps: CreateAppDeps = {}) {
       sendInternalError(
         res,
         "Failed to enroll keystroke profile.",
+        error instanceof Error ? error.message : error
+      );
+    }
+  });
+
+  app.post("/verify/keystroke", async (req: Request, res: Response) => {
+    const { request: parsed, fieldErrors } = parseVerifyKeystrokeRequest(req.body);
+    if (!parsed) {
+      sendValidationError(res, "Invalid keystroke verification request.", fieldErrors);
+      return;
+    }
+
+    try {
+      const verified = await verifyKeystrokeAgainstProfile({
+        userId: parsed.userId,
+        sample: parsed.sample,
+        policy: parsed.policy,
+        storage,
+        nowIso: nowFnIso(),
+      });
+
+      const response: VerifyKeystrokeResponse = {
+        ok: true,
+        userId: parsed.userId,
+        similarityScore: verified.signal.similarityScore,
+        distance: verified.signal.distance,
+        decision: verified.signal.decision,
+        reasons: verified.signal.reasons,
+        sampleMetrics: verified.signal.sampleMetrics,
+        profile: verified.profile ?? null,
+        profileUpdated: verified.profileUpdated,
+        signalsUsed: {
+          keystroke: verified.signal,
+        },
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      sendInternalError(
+        res,
+        "Failed to verify keystroke sample.",
         error instanceof Error ? error.message : error
       );
     }

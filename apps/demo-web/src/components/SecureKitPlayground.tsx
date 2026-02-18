@@ -1,65 +1,32 @@
-import React, { useEffect, useMemo, useState } from "react";
-import type { KeystrokeEvent } from "@securekit/core";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type {
-  ConsentResponse,
-  DeleteBiometricsResponse,
-  EnrollKeystrokeResponse,
-  GetProfilesResponse,
-  LocationResult,
-  NetworkResult,
-  VerifySessionResponse,
+  ChallengeLang,
+  ChallengeLength,
+  ChallengeTextResponse,
+  KeystrokeEvent,
+  KeystrokeSampleMetrics,
+} from "@securekit/core";
+import {
+  buildKeystrokeSample,
+  createKeystrokeCollector,
+  type ConsentResponse,
+  type DeleteBiometricsResponse,
+  type EnrollKeystrokeResponse,
+  type GetProfilesResponse,
+  type VerifyKeystrokeResponse,
+  type VerifySessionResponse,
 } from "@securekit/web-sdk";
 import {
   createSecureKitClient,
   deleteSecureKitJson,
   formatSecureKitError,
-  postSecureKitJson,
   resolveSecureKitBaseUrl,
 } from "../lib/secureKitClient.js";
 
-type MockScenario = "clean" | "risky";
 type SectionBusy = "idle" | "loading";
+type CollectorApi = ReturnType<typeof createKeystrokeCollector>;
 
-function parseAllowedCountries(input: string): string[] {
-  return Array.from(
-    new Set(
-      input
-        .split(",")
-        .map((part) => part.trim().toUpperCase())
-        .filter((part) => part.length > 0)
-    )
-  );
-}
-
-function createSeededRng(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (1664525 * state + 1013904223) >>> 0;
-    return state / 0x100000000;
-  };
-}
-
-function createDeterministicEvents(
-  text = "securekitdemo",
-  seed = 1337
-): KeystrokeEvent[] {
-  const rng = createSeededRng(seed);
-  const events: KeystrokeEvent[] = [];
-  let t = 0;
-
-  for (const char of text) {
-    const flightMs = 35 + Math.floor(rng() * 40);
-    const holdMs = 70 + Math.floor(rng() * 55);
-
-    t += flightMs;
-    events.push({ key: char, type: "down", t });
-
-    t += holdMs;
-    events.push({ key: char, type: "up", t });
-  }
-
-  return events;
-}
+type KeystrokeDecision = "allow" | "step_up" | "deny";
 
 function usePersistentState<T>(
   key: string,
@@ -81,11 +48,17 @@ function usePersistentState<T>(
     try {
       window.localStorage.setItem(key, JSON.stringify(value));
     } catch {
-      // ignore storage errors in playground
+      // ignore
     }
   }, [key, value]);
 
   return [value, setValue];
+}
+
+function parseNumber(value: string, fallback: number, min = 0, max = Number.POSITIVE_INFINITY): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
 }
 
 function pretty(value: unknown): string {
@@ -122,70 +95,22 @@ export const SecureKitPlayground: React.FC = () => {
   const baseUrl = resolveSecureKitBaseUrl();
   const client = useMemo(() => createSecureKitClient(baseUrl), [baseUrl]);
 
-  const [mockScenario, setMockScenario] = usePersistentState<MockScenario>(
-    "securekit.playground.mockScenario",
-    "clean"
-  );
-
-  const [clientOffsetInput, setClientOffsetInput] = usePersistentState(
-    "securekit.playground.clientOffset",
-    String(-new Date().getTimezoneOffset())
-  );
-  const [allowedCountriesInput, setAllowedCountriesInput] = usePersistentState(
-    "securekit.playground.allowedCountries",
-    "TR,US"
-  );
-  const [sessionPolicyCountriesInput, setSessionPolicyCountriesInput] = usePersistentState(
-    "securekit.playground.sessionPolicyCountries",
-    "TR,US"
-  );
-  const [sessionId, setSessionId] = usePersistentState("securekit.playground.sessionId", "");
-  const [sessionExpiresAt, setSessionExpiresAt] = usePersistentState(
-    "securekit.playground.sessionExpiresAt",
-    ""
-  );
   const [userId, setUserId] = usePersistentState("securekit.playground.userId", "demo-user-1");
-  const [consentVersion, setConsentVersion] = usePersistentState(
-    "securekit.playground.consentVersion",
-    "v1"
-  );
+  const [consentVersion, setConsentVersion] = usePersistentState("securekit.playground.consentVersion", "v1");
+  const [challengeLang, setChallengeLang] = usePersistentState<ChallengeLang>("securekit.playground.challengeLang", "en");
+  const [challengeLength, setChallengeLength] = usePersistentState<ChallengeLength>("securekit.playground.challengeLength", "short");
+  const [targetRoundsInput, setTargetRoundsInput] = usePersistentState("securekit.playground.targetRounds", "10");
+  const [showRawEvents, setShowRawEvents] = usePersistentState("securekit.playground.showRawEvents", false);
+  const [deleteConsent, setDeleteConsent] = usePersistentState("securekit.playground.deleteConsent", false);
 
-  const [includeNetworkSignal, setIncludeNetworkSignal] = usePersistentState(
-    "securekit.playground.includeNetworkSignal",
-    true
-  );
-  const [includeLocationSignal, setIncludeLocationSignal] = usePersistentState(
-    "securekit.playground.includeLocationSignal",
-    true
-  );
-  const [autoRunNetwork, setAutoRunNetwork] = usePersistentState(
-    "securekit.playground.autoRunNetwork",
-    true
-  );
-  const [autoRunLocation, setAutoRunLocation] = usePersistentState(
-    "securekit.playground.autoRunLocation",
-    true
-  );
-  const [deleteConsent, setDeleteConsent] = usePersistentState(
-    "securekit.playground.deleteConsent",
-    false
-  );
+  const [allowThresholdInput, setAllowThresholdInput] = usePersistentState("securekit.playground.allowThreshold", "0.76");
+  const [stepUpThresholdInput, setStepUpThresholdInput] = usePersistentState("securekit.playground.stepUpThreshold", "0.56");
+  const [denyThresholdInput, setDenyThresholdInput] = usePersistentState("securekit.playground.denyThreshold", "0.36");
 
-  const [healthBusy, setHealthBusy] = useState<SectionBusy>("idle");
-  const [healthError, setHealthError] = useState<string | null>(null);
-  const [healthResult, setHealthResult] = useState<{ ok: boolean } | null>(null);
-
-  const [networkBusy, setNetworkBusy] = useState<SectionBusy>("idle");
-  const [networkError, setNetworkError] = useState<string | null>(null);
-  const [networkResult, setNetworkResult] = useState<NetworkResult | null>(null);
-
-  const [locationBusy, setLocationBusy] = useState<SectionBusy>("idle");
-  const [locationError, setLocationError] = useState<string | null>(null);
-  const [locationResult, setLocationResult] = useState<LocationResult | null>(null);
-
+  const [sessionId, setSessionId] = usePersistentState("securekit.playground.sessionId", "");
+  const [sessionResult, setSessionResult] = useState<VerifySessionResponse | null>(null);
   const [sessionBusy, setSessionBusy] = useState<SectionBusy>("idle");
   const [sessionError, setSessionError] = useState<string | null>(null);
-  const [sessionResult, setSessionResult] = useState<VerifySessionResponse | null>(null);
 
   const [consentBusy, setConsentBusy] = useState<SectionBusy>("idle");
   const [consentError, setConsentError] = useState<string | null>(null);
@@ -194,6 +119,15 @@ export const SecureKitPlayground: React.FC = () => {
   const [enrollBusy, setEnrollBusy] = useState<SectionBusy>("idle");
   const [enrollError, setEnrollError] = useState<string | null>(null);
   const [enrollResult, setEnrollResult] = useState<EnrollKeystrokeResponse | null>(null);
+  const [enrollChallenge, setEnrollChallenge] = useState<ChallengeTextResponse | null>(null);
+  const [enrollTyped, setEnrollTyped] = useState("");
+  const [enrollRoundsCompleted, setEnrollRoundsCompleted] = useState(0);
+
+  const [verifyBusy, setVerifyBusy] = useState<SectionBusy>("idle");
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [verifyResult, setVerifyResult] = useState<VerifyKeystrokeResponse | null>(null);
+  const [verifyChallenge, setVerifyChallenge] = useState<ChallengeTextResponse | null>(null);
+  const [verifyTyped, setVerifyTyped] = useState("");
 
   const [profilesBusy, setProfilesBusy] = useState<SectionBusy>("idle");
   const [profilesError, setProfilesError] = useState<string | null>(null);
@@ -202,186 +136,59 @@ export const SecureKitPlayground: React.FC = () => {
   const [deleteBusy, setDeleteBusy] = useState<SectionBusy>("idle");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteResult, setDeleteResult] = useState<DeleteBiometricsResponse | null>(null);
-  const [lastEnrollmentEvents, setLastEnrollmentEvents] = useState<KeystrokeEvent[] | null>(null);
 
-  const allowedCountries = useMemo(
-    () => parseAllowedCountries(allowedCountriesInput),
-    [allowedCountriesInput]
-  );
-  const sessionPolicyCountries = useMemo(
-    () => parseAllowedCountries(sessionPolicyCountriesInput),
-    [sessionPolicyCountriesInput]
-  );
+  const [lastMetrics, setLastMetrics] = useState<KeystrokeSampleMetrics | null>(null);
+  const [lastRawEvents, setLastRawEvents] = useState<KeystrokeEvent[] | null>(null);
 
-  const resolveClientOffsetMin = (): number | null => {
-    const parsed = Number(clientOffsetInput);
-    return Number.isFinite(parsed) ? parsed : null;
-  };
+  const enrollInputRef = useRef<HTMLInputElement | null>(null);
+  const verifyInputRef = useRef<HTMLInputElement | null>(null);
+  const enrollCollectorRef = useRef<CollectorApi | null>(null);
+  const verifyCollectorRef = useRef<CollectorApi | null>(null);
 
-  const requestNetwork = async (): Promise<NetworkResult> => {
-    return postSecureKitJson<NetworkResult>(
-      "/verify/network",
-      {
-        clientOffsetMin: resolveClientOffsetMin(),
-        scenario: mockScenario,
-      },
-      baseUrl
-    );
-  };
+  const targetRounds = Math.max(1, Math.round(parseNumber(targetRoundsInput, 10, 1, 50)));
+  const allowThreshold = parseNumber(allowThresholdInput, 0.76, 0, 1);
+  const stepUpThreshold = parseNumber(stepUpThresholdInput, 0.56, 0, 1);
+  const denyThreshold = parseNumber(denyThresholdInput, 0.36, 0, 1);
 
-  const requestLocation = async (): Promise<LocationResult> => {
-    return postSecureKitJson<LocationResult>(
-      "/verify/location",
-      {
-        allowedCountries: allowedCountries.length > 0 ? allowedCountries : undefined,
-        scenario: mockScenario,
-      },
-      baseUrl
-    );
-  };
+  useEffect(() => {
+    const input = enrollInputRef.current;
+    if (!input || !enrollChallenge) return undefined;
 
-  const runHealth = async () => {
-    setHealthBusy("loading");
-    setHealthError(null);
-    setHealthResult(null);
+    const collector = createKeystrokeCollector(input, {
+      expectedText: enrollChallenge.text,
+      includeBackspace: true,
+      includeEnter: false,
+      includeRawKey: showRawEvents,
+    });
+    enrollCollectorRef.current = collector;
 
-    try {
-      const result = await client.health();
-      setHealthResult(result);
-    } catch (error) {
-      setHealthError(formatSecureKitError(error, baseUrl));
-    } finally {
-      setHealthBusy("idle");
-    }
-  };
-
-  const runNetwork = async () => {
-    setNetworkBusy("loading");
-    setNetworkError(null);
-
-    try {
-      const result = await requestNetwork();
-      setNetworkResult(result);
-    } catch (error) {
-      setNetworkError(formatSecureKitError(error, baseUrl));
-    } finally {
-      setNetworkBusy("idle");
-    }
-  };
-
-  const runLocation = async () => {
-    setLocationBusy("loading");
-    setLocationError(null);
-
-    try {
-      const result = await requestLocation();
-      setLocationResult(result);
-    } catch (error) {
-      setLocationError(formatSecureKitError(error, baseUrl));
-    } finally {
-      setLocationBusy("idle");
-    }
-  };
-
-  const startSession = async (): Promise<string | null> => {
-    setSessionBusy("loading");
-    setSessionError(null);
-
-    try {
-      const started = await client.startSession();
-      setSessionId(started.sessionId);
-      setSessionExpiresAt(started.expiresAt);
-      return started.sessionId;
-    } catch (error) {
-      setSessionError(formatSecureKitError(error, baseUrl));
-      return null;
-    } finally {
-      setSessionBusy("idle");
-    }
-  };
-
-  const runOptionalSignals = async (): Promise<{
-    network?: NetworkResult;
-    location?: LocationResult;
-  }> => {
-    const out: { network?: NetworkResult; location?: LocationResult } = {};
-
-    if (autoRunNetwork) {
-      const n = await requestNetwork();
-      out.network = n;
-      setNetworkResult(n);
-    }
-
-    if (autoRunLocation) {
-      const l = await requestLocation();
-      out.location = l;
-      setLocationResult(l);
-    }
-
-    return out;
-  };
-
-  const verifySession = async (sessionIdToUse: string, freshSignals?: {
-    network?: NetworkResult;
-    location?: LocationResult;
-  }) => {
-    const normalizedSessionId = sessionIdToUse.trim();
-    if (!normalizedSessionId) {
-      setSessionError("Session ID is required. Start a session first.");
-      return;
-    }
-
-    setSessionBusy("loading");
-    setSessionError(null);
-    setSessionResult(null);
-
-    try {
-      const effectiveNetwork = freshSignals?.network ?? networkResult ?? undefined;
-      const effectiveLocation = freshSignals?.location ?? locationResult ?? undefined;
-
-      const signals: { network?: NetworkResult; location?: LocationResult } = {};
-      if (includeNetworkSignal && effectiveNetwork) {
-        signals.network = effectiveNetwork;
+    return () => {
+      collector.stop();
+      if (enrollCollectorRef.current === collector) {
+        enrollCollectorRef.current = null;
       }
-      if (includeLocationSignal && effectiveLocation) {
-        signals.location = effectiveLocation;
+    };
+  }, [enrollChallenge?.challengeId, showRawEvents]);
+
+  useEffect(() => {
+    const input = verifyInputRef.current;
+    if (!input || !verifyChallenge) return undefined;
+
+    const collector = createKeystrokeCollector(input, {
+      expectedText: verifyChallenge.text,
+      includeBackspace: true,
+      includeEnter: false,
+      includeRawKey: showRawEvents,
+    });
+    verifyCollectorRef.current = collector;
+
+    return () => {
+      collector.stop();
+      if (verifyCollectorRef.current === collector) {
+        verifyCollectorRef.current = null;
       }
-
-      const result = await client.verifySession({
-        sessionId: normalizedSessionId,
-        policy: {
-          allowMaxRisk: 30,
-          denyMinRisk: 85,
-          stepUpSteps: ["keystroke"],
-          allowedCountries:
-            sessionPolicyCountries.length > 0 ? sessionPolicyCountries : undefined,
-        },
-        signals: Object.keys(signals).length > 0 ? signals : undefined,
-      });
-
-      setSessionResult(result);
-    } catch (error) {
-      setSessionError(formatSecureKitError(error, baseUrl));
-    } finally {
-      setSessionBusy("idle");
-    }
-  };
-
-  const runFullSessionFlow = async () => {
-    setSessionError(null);
-    const startedId = await startSession();
-    if (!startedId) return;
-
-    setSessionBusy("loading");
-    try {
-      const freshSignals = await runOptionalSignals();
-      await verifySession(startedId, freshSignals);
-    } catch (error) {
-      setSessionError(formatSecureKitError(error, baseUrl));
-    } finally {
-      setSessionBusy("idle");
-    }
-  };
+    };
+  }, [verifyChallenge?.challengeId, showRawEvents]);
 
   const runConsent = async () => {
     const normalizedUserId = userId.trim();
@@ -400,11 +207,12 @@ export const SecureKitPlayground: React.FC = () => {
     setConsentResult(null);
 
     try {
-      const result = await client.grantConsent({
-        userId: normalizedUserId,
-        consentVersion: normalizedConsentVersion,
-      });
-      setConsentResult(result);
+      setConsentResult(
+        await client.grantConsent({
+          userId: normalizedUserId,
+          consentVersion: normalizedConsentVersion,
+        })
+      );
     } catch (error) {
       setConsentError(formatSecureKitError(error, baseUrl));
     } finally {
@@ -412,30 +220,183 @@ export const SecureKitPlayground: React.FC = () => {
     }
   };
 
-  const runEnroll = async () => {
-    const normalizedUserId = userId.trim();
-    if (!normalizedUserId) {
-      setEnrollError("userId is required.");
-      return;
-    }
+  const getChallenge = async () =>
+    client.getTextChallenge({
+      lang: challengeLang,
+      length: challengeLength,
+    });
 
-    const events = createDeterministicEvents();
-    setLastEnrollmentEvents(events);
-
+  const startEnrollment = async () => {
     setEnrollBusy("loading");
     setEnrollError(null);
-    setEnrollResult(null);
-
     try {
-      const result = await client.enrollKeystroke({
-        userId: normalizedUserId,
-        events,
-      });
-      setEnrollResult(result);
+      const challenge = await getChallenge();
+      setEnrollChallenge(challenge);
+      setEnrollTyped("");
+      enrollCollectorRef.current?.reset();
     } catch (error) {
       setEnrollError(formatSecureKitError(error, baseUrl));
     } finally {
       setEnrollBusy("idle");
+    }
+  };
+
+  const submitEnrollment = async () => {
+    const normalizedUserId = userId.trim();
+    if (!normalizedUserId || !enrollChallenge || !enrollCollectorRef.current) return;
+
+    setEnrollBusy("loading");
+    setEnrollError(null);
+
+    try {
+      const collector = enrollCollectorRef.current;
+      collector.stop();
+      const snapshot = collector.getSnapshot();
+      if (snapshot.events.length === 0) {
+        setEnrollError("No keystroke events captured. Keep input focused while typing.");
+        return;
+      }
+
+      const sample = buildKeystrokeSample(snapshot.events, enrollChallenge.text, {
+        challengeId: enrollChallenge.challengeId,
+        typedLength: snapshot.typedLength,
+        errorCount: snapshot.errorCount,
+        backspaceCount: snapshot.backspaceCount,
+        ignoredEventCount: snapshot.ignoredEventCount,
+        imeCompositionUsed: snapshot.imeCompositionUsed,
+      });
+
+      const result = await client.enrollKeystroke({
+        userId: normalizedUserId,
+        challengeId: enrollChallenge.challengeId,
+        sample,
+        expectedText: enrollChallenge.text,
+        typedLength: snapshot.typedLength,
+        errorCount: snapshot.errorCount,
+        backspaceCount: snapshot.backspaceCount,
+        imeCompositionUsed: snapshot.imeCompositionUsed,
+      });
+
+      setEnrollResult(result);
+      setLastMetrics(result.sampleMetrics ?? null);
+      setLastRawEvents(showRawEvents ? snapshot.events : null);
+
+      const completed = result.enrollmentProgress?.roundsCompleted ?? enrollRoundsCompleted + 1;
+      setEnrollRoundsCompleted(completed);
+
+      const ready = result.enrollmentProgress?.ready ?? completed >= targetRounds;
+      if (ready) {
+        setEnrollChallenge(null);
+        setEnrollTyped("");
+      } else {
+        const nextChallenge = await getChallenge();
+        setEnrollChallenge(nextChallenge);
+        setEnrollTyped("");
+        collector.reset();
+      }
+    } catch (error) {
+      setEnrollError(formatSecureKitError(error, baseUrl));
+    } finally {
+      setEnrollBusy("idle");
+    }
+  };
+
+  const startVerification = async () => {
+    setVerifyBusy("loading");
+    setVerifyError(null);
+    setVerifyResult(null);
+
+    try {
+      const challenge = await getChallenge();
+      setVerifyChallenge(challenge);
+      setVerifyTyped("");
+      verifyCollectorRef.current?.reset();
+    } catch (error) {
+      setVerifyError(formatSecureKitError(error, baseUrl));
+    } finally {
+      setVerifyBusy("idle");
+    }
+  };
+
+  const submitVerification = async () => {
+    const normalizedUserId = userId.trim();
+    if (!normalizedUserId || !verifyChallenge || !verifyCollectorRef.current) return;
+
+    setVerifyBusy("loading");
+    setVerifyError(null);
+
+    try {
+      const collector = verifyCollectorRef.current;
+      collector.stop();
+      const snapshot = collector.getSnapshot();
+      if (snapshot.events.length === 0) {
+        setVerifyError("No keystroke events captured.");
+        return;
+      }
+
+      const sample = buildKeystrokeSample(snapshot.events, verifyChallenge.text, {
+        challengeId: verifyChallenge.challengeId,
+        typedLength: snapshot.typedLength,
+        errorCount: snapshot.errorCount,
+        backspaceCount: snapshot.backspaceCount,
+        ignoredEventCount: snapshot.ignoredEventCount,
+        imeCompositionUsed: snapshot.imeCompositionUsed,
+      });
+
+      const result = await client.verifyKeystroke({
+        userId: normalizedUserId,
+        challengeId: verifyChallenge.challengeId,
+        sample,
+        policy: {
+          enabled: true,
+          allowThreshold,
+          stepUpThreshold,
+          denyThreshold,
+          updateProfileOnAllow: true,
+        },
+      });
+
+      setVerifyResult(result);
+      setLastMetrics(result.sampleMetrics);
+      setLastRawEvents(showRawEvents ? snapshot.events : null);
+
+      if (sessionId.trim()) {
+        setSessionBusy("loading");
+        setSessionError(null);
+        try {
+          const decision = (result.decision as KeystrokeDecision) === "step_up" ? "keystroke" : "keystroke";
+          setSessionResult(
+            await client.verifySession({
+              sessionId: sessionId.trim(),
+              userId: normalizedUserId,
+              policy: {
+                stepUpSteps: [decision],
+                keystroke: {
+                  enabled: true,
+                  allowThreshold,
+                  stepUpThreshold,
+                  denyThreshold,
+                  updateProfileOnAllow: true,
+                },
+              },
+              signals: {
+                keystroke: sample,
+              },
+            })
+          );
+        } catch (error) {
+          setSessionError(formatSecureKitError(error, baseUrl));
+        } finally {
+          setSessionBusy("idle");
+        }
+      }
+
+      setVerifyChallenge(null);
+      setVerifyTyped("");
+    } catch (error) {
+      setVerifyError(formatSecureKitError(error, baseUrl));
+    } finally {
+      setVerifyBusy("idle");
     }
   };
 
@@ -451,8 +412,7 @@ export const SecureKitPlayground: React.FC = () => {
     setProfilesResult(null);
 
     try {
-      const result = await client.getProfiles(normalizedUserId);
-      setProfilesResult(result);
+      setProfilesResult(await client.getProfiles(normalizedUserId));
     } catch (error) {
       setProfilesError(formatSecureKitError(error, baseUrl));
     } finally {
@@ -460,7 +420,7 @@ export const SecureKitPlayground: React.FC = () => {
     }
   };
 
-  const runDeleteBiometrics = async () => {
+  const runDelete = async () => {
     const normalizedUserId = userId.trim();
     if (!normalizedUserId) {
       setDeleteError("userId is required.");
@@ -473,16 +433,34 @@ export const SecureKitPlayground: React.FC = () => {
 
     try {
       const path = deleteConsent ? "/user/biometrics?deleteConsent=true" : "/user/biometrics";
-      const result = await deleteSecureKitJson<DeleteBiometricsResponse>(
-        path,
-        { userId: normalizedUserId },
-        baseUrl
+      setDeleteResult(
+        await deleteSecureKitJson<DeleteBiometricsResponse>(
+          path,
+          { userId: normalizedUserId },
+          baseUrl
+        )
       );
-      setDeleteResult(result);
+      setEnrollRoundsCompleted(0);
+      setEnrollResult(null);
+      setVerifyResult(null);
     } catch (error) {
       setDeleteError(formatSecureKitError(error, baseUrl));
     } finally {
       setDeleteBusy("idle");
+    }
+  };
+
+  const onEnrollChange = (value: string) => {
+    setEnrollTyped(value);
+    if (enrollBusy === "idle" && enrollChallenge && value === enrollChallenge.text) {
+      void submitEnrollment();
+    }
+  };
+
+  const onVerifyChange = (value: string) => {
+    setVerifyTyped(value);
+    if (verifyBusy === "idle" && verifyChallenge && value === verifyChallenge.text) {
+      void submitVerification();
     }
   };
 
@@ -494,213 +472,152 @@ export const SecureKitPlayground: React.FC = () => {
       </p>
 
       <div style={panelStyle}>
-        <h2 style={{ marginTop: 0 }}>General</h2>
-        <div style={rowStyle}>
-          <label>
-            Mock scenario:
-            <select
-              value={mockScenario}
-              onChange={(event) => setMockScenario(event.target.value as MockScenario)}
-              style={{ marginLeft: 8 }}
-            >
-              <option value="clean">clean</option>
-              <option value="risky">risky</option>
-            </select>
-          </label>
-          <button onClick={runHealth} disabled={healthBusy !== "idle"}>
-            {healthBusy === "loading" ? "Checking..." : "GET /health"}
-          </button>
-        </div>
-        {healthError && <div style={{ color: "red", marginTop: 8 }}>{healthError}</div>}
-        {healthResult && <pre style={preStyle}>{pretty(healthResult)}</pre>}
-      </div>
+        <h2 style={{ marginTop: 0 }}>Keystroke Dynamics Flow</h2>
 
-      <div style={panelStyle}>
-        <h2 style={{ marginTop: 0 }}>1) Network Check</h2>
-        <div style={rowStyle}>
-          <label>
-            clientOffsetMin:
-            <input
-              value={clientOffsetInput}
-              onChange={(event) => setClientOffsetInput(event.target.value)}
-              style={{ marginLeft: 8, width: 100 }}
-            />
-          </label>
-          <button onClick={runNetwork} disabled={networkBusy !== "idle"}>
-            {networkBusy === "loading" ? "Running..." : "POST /verify/network"}
-          </button>
-        </div>
-        {networkError && <div style={{ color: "red", marginTop: 8 }}>{networkError}</div>}
-        {networkResult && <pre style={preStyle}>{pretty(networkResult)}</pre>}
-      </div>
-
-      <div style={panelStyle}>
-        <h2 style={{ marginTop: 0 }}>2) Location Check</h2>
-        <div style={rowStyle}>
-          <label>
-            allowedCountries:
-            <input
-              value={allowedCountriesInput}
-              onChange={(event) => setAllowedCountriesInput(event.target.value)}
-              style={{ marginLeft: 8, minWidth: 240 }}
-              placeholder="TR,US"
-            />
-          </label>
-          <button onClick={runLocation} disabled={locationBusy !== "idle"}>
-            {locationBusy === "loading" ? "Running..." : "POST /verify/location"}
-          </button>
-        </div>
-        {locationError && <div style={{ color: "red", marginTop: 8 }}>{locationError}</div>}
-        {locationResult && <pre style={preStyle}>{pretty(locationResult)}</pre>}
-      </div>
-
-      <div style={panelStyle}>
-        <h2 style={{ marginTop: 0 }}>3) Session Flow</h2>
-        <div style={rowStyle}>
-          <button onClick={() => void startSession()} disabled={sessionBusy !== "idle"}>
-            {sessionBusy === "loading" ? "Working..." : "POST /session/start"}
-          </button>
-          <button onClick={() => void runFullSessionFlow()} disabled={sessionBusy !== "idle"}>
-            {sessionBusy === "loading" ? "Working..." : "Start + Optional Checks + Verify"}
-          </button>
-          <button
-            onClick={() => void verifySession(sessionId)}
-            disabled={sessionBusy !== "idle" || sessionId.trim().length === 0}
-          >
-            {sessionBusy === "loading" ? "Working..." : "POST /verify/session"}
-          </button>
-        </div>
-
-        <div style={rowStyle}>
-          <label>
-            sessionId:
-            <input
-              value={sessionId}
-              onChange={(event) => setSessionId(event.target.value)}
-              style={{ marginLeft: 8, minWidth: 260 }}
-            />
-          </label>
-          <label>
-            expiresAt: <code>{sessionExpiresAt || "-"}</code>
-          </label>
-        </div>
-
-        <div style={rowStyle}>
-          <label>
-            session policy allowedCountries:
-            <input
-              value={sessionPolicyCountriesInput}
-              onChange={(event) => setSessionPolicyCountriesInput(event.target.value)}
-              style={{ marginLeft: 8, minWidth: 220 }}
-            />
-          </label>
-        </div>
-
-        <div style={rowStyle}>
-          <label>
-            <input
-              type="checkbox"
-              checked={autoRunNetwork}
-              onChange={(event) => setAutoRunNetwork(event.target.checked)}
-            />
-            auto-run network before verify
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={autoRunLocation}
-              onChange={(event) => setAutoRunLocation(event.target.checked)}
-            />
-            auto-run location before verify
-          </label>
-        </div>
-
-        <div style={rowStyle}>
-          <label>
-            <input
-              type="checkbox"
-              checked={includeNetworkSignal}
-              onChange={(event) => setIncludeNetworkSignal(event.target.checked)}
-            />
-            include network signal in /verify/session
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={includeLocationSignal}
-              onChange={(event) => setIncludeLocationSignal(event.target.checked)}
-            />
-            include location signal in /verify/session
-          </label>
-        </div>
-
-        {sessionError && <div style={{ color: "red", marginTop: 8 }}>{sessionError}</div>}
-        {sessionResult && <pre style={preStyle}>{pretty(sessionResult)}</pre>}
-      </div>
-
-      <div style={panelStyle}>
-        <h2 style={{ marginTop: 0 }}>4) Consent + Keystroke Enrollment</h2>
         <div style={rowStyle}>
           <label>
             userId:
-            <input
-              value={userId}
-              onChange={(event) => setUserId(event.target.value)}
-              style={{ marginLeft: 8, minWidth: 180 }}
-            />
+            <input value={userId} onChange={(event) => setUserId(event.target.value)} style={{ marginLeft: 8 }} />
           </label>
           <label>
             consentVersion:
-            <input
-              value={consentVersion}
-              onChange={(event) => setConsentVersion(event.target.value)}
-              style={{ marginLeft: 8, width: 80 }}
-            />
+            <input value={consentVersion} onChange={(event) => setConsentVersion(event.target.value)} style={{ marginLeft: 8, width: 90 }} />
           </label>
-        </div>
-
-        <div style={rowStyle}>
           <button onClick={runConsent} disabled={consentBusy !== "idle"}>
-            {consentBusy === "loading" ? "Working..." : "POST /consent"}
-          </button>
-          <button onClick={runEnroll} disabled={enrollBusy !== "idle"}>
-            {enrollBusy === "loading" ? "Working..." : "POST /enroll/keystroke"}
-          </button>
-          <button onClick={runProfiles} disabled={profilesBusy !== "idle"}>
-            {profilesBusy === "loading" ? "Working..." : "GET /user/:userId/profiles"}
-          </button>
-          <button onClick={runDeleteBiometrics} disabled={deleteBusy !== "idle"}>
-            {deleteBusy === "loading" ? "Working..." : "DELETE /user/biometrics"}
+            {consentBusy === "loading" ? "Working..." : "Step 1: POST /consent"}
           </button>
         </div>
 
         <div style={rowStyle}>
           <label>
-            <input
-              type="checkbox"
-              checked={deleteConsent}
-              onChange={(event) => setDeleteConsent(event.target.checked)}
-            />
-            deleteConsent=true query
+            lang:
+            <select value={challengeLang} onChange={(event) => setChallengeLang(event.target.value as ChallengeLang)} style={{ marginLeft: 8 }}>
+              <option value="en">en</option>
+              <option value="tr">tr</option>
+            </select>
+          </label>
+          <label>
+            length:
+            <select value={challengeLength} onChange={(event) => setChallengeLength(event.target.value as ChallengeLength)} style={{ marginLeft: 8 }}>
+              <option value="short">short</option>
+              <option value="medium">medium</option>
+              <option value="long">long</option>
+            </select>
+          </label>
+          <label>
+            target rounds:
+            <input value={targetRoundsInput} onChange={(event) => setTargetRoundsInput(event.target.value)} style={{ marginLeft: 8, width: 70 }} />
           </label>
         </div>
 
-        {consentError && <div style={{ color: "red", marginTop: 8 }}>{consentError}</div>}
-        {consentResult && <pre style={preStyle}>{pretty(consentResult)}</pre>}
+        <div style={rowStyle}>
+          <label>
+            <input type="checkbox" checked={showRawEvents} onChange={(event) => setShowRawEvents(event.target.checked)} />
+            show raw events (dev)
+          </label>
+          <label>
+            sessionId:
+            <input value={sessionId} onChange={(event) => setSessionId(event.target.value)} style={{ marginLeft: 8, width: 220 }} placeholder="optional /verify/session" />
+          </label>
+        </div>
 
-        {enrollError && <div style={{ color: "red", marginTop: 8 }}>{enrollError}</div>}
-        {enrollResult && <pre style={preStyle}>{pretty(enrollResult)}</pre>}
-
-        {profilesError && <div style={{ color: "red", marginTop: 8 }}>{profilesError}</div>}
-        {profilesResult && <pre style={preStyle}>{pretty(profilesResult)}</pre>}
-
-        {deleteError && <div style={{ color: "red", marginTop: 8 }}>{deleteError}</div>}
-        {deleteResult && <pre style={preStyle}>{pretty(deleteResult)}</pre>}
-
-        {lastEnrollmentEvents && (
+        <h3 style={{ marginTop: 16 }}>Step 2: Enrollment</h3>
+        <div style={rowStyle}>
+          <button onClick={() => void startEnrollment()} disabled={enrollBusy !== "idle"}>
+            {enrollBusy === "loading" ? "Working..." : "Start Enrollment Challenge"}
+          </button>
+          <div>progress: {enrollRoundsCompleted}/{targetRounds}</div>
+        </div>
+        {enrollChallenge && (
           <>
-            <h3 style={{ marginTop: 12 }}>Deterministic Keystroke Events</h3>
-            <pre style={preStyle}>{pretty(lastEnrollmentEvents)}</pre>
+            <div style={{ marginTop: 8 }}>challenge: <code>{enrollChallenge.text}</code></div>
+            <input
+              ref={enrollInputRef}
+              value={enrollTyped}
+              onChange={(event) => onEnrollChange(event.target.value)}
+              onFocus={() => enrollCollectorRef.current?.start()}
+              onBlur={() => enrollCollectorRef.current?.stop()}
+              style={{ marginTop: 8, width: "100%", maxWidth: 760 }}
+              placeholder="Type exactly as shown"
+            />
+          </>
+        )}
+
+        <h3 style={{ marginTop: 16 }}>Step 3: Verification</h3>
+        <div style={rowStyle}>
+          <label>
+            allow:
+            <input value={allowThresholdInput} onChange={(event) => setAllowThresholdInput(event.target.value)} style={{ marginLeft: 8, width: 65 }} />
+          </label>
+          <label>
+            step_up:
+            <input value={stepUpThresholdInput} onChange={(event) => setStepUpThresholdInput(event.target.value)} style={{ marginLeft: 8, width: 65 }} />
+          </label>
+          <label>
+            deny:
+            <input value={denyThresholdInput} onChange={(event) => setDenyThresholdInput(event.target.value)} style={{ marginLeft: 8, width: 65 }} />
+          </label>
+          <button onClick={() => void startVerification()} disabled={verifyBusy !== "idle"}>
+            {verifyBusy === "loading" ? "Working..." : "Start Verification Challenge"}
+          </button>
+        </div>
+        {verifyChallenge && (
+          <>
+            <div style={{ marginTop: 8 }}>challenge: <code>{verifyChallenge.text}</code></div>
+            <input
+              ref={verifyInputRef}
+              value={verifyTyped}
+              onChange={(event) => onVerifyChange(event.target.value)}
+              onFocus={() => verifyCollectorRef.current?.start()}
+              onBlur={() => verifyCollectorRef.current?.stop()}
+              style={{ marginTop: 8, width: "100%", maxWidth: 760 }}
+              placeholder="Type exactly as shown"
+            />
+          </>
+        )}
+
+        {consentError && <div style={{ color: "red", marginTop: 8 }}>{consentError}</div>}
+        {enrollError && <div style={{ color: "red", marginTop: 8 }}>{enrollError}</div>}
+        {verifyError && <div style={{ color: "red", marginTop: 8 }}>{verifyError}</div>}
+        {profilesError && <div style={{ color: "red", marginTop: 8 }}>{profilesError}</div>}
+        {deleteError && <div style={{ color: "red", marginTop: 8 }}>{deleteError}</div>}
+        {sessionError && <div style={{ color: "red", marginTop: 8 }}>{sessionError}</div>}
+
+        {consentResult && <pre style={preStyle}>{pretty(consentResult)}</pre>}
+        {enrollResult && <pre style={preStyle}>{pretty(enrollResult)}</pre>}
+        {verifyResult && (
+          <div style={{ marginTop: 12 }}>
+            <div>similarityScore: <strong>{verifyResult.similarityScore}</strong></div>
+            <div>decision: <strong>{verifyResult.decision}</strong></div>
+            <div>reasons: {verifyResult.reasons.join(", ") || "-"}</div>
+            <pre style={preStyle}>{pretty(verifyResult)}</pre>
+          </div>
+        )}
+
+        <div style={rowStyle}>
+          <button onClick={runProfiles} disabled={profilesBusy !== "idle"}>
+            {profilesBusy === "loading" ? "Working..." : "GET /user/:userId/profiles"}
+          </button>
+          <button onClick={runDelete} disabled={deleteBusy !== "idle"}>
+            {deleteBusy === "loading" ? "Working..." : "DELETE /user/biometrics"}
+          </button>
+          <label>
+            <input type="checkbox" checked={deleteConsent} onChange={(event) => setDeleteConsent(event.target.checked)} />
+            deleteConsent=true
+          </label>
+        </div>
+
+        {profilesResult && <pre style={preStyle}>{pretty(profilesResult)}</pre>}
+        {deleteResult && <pre style={preStyle}>{pretty(deleteResult)}</pre>}
+        {sessionResult && <pre style={preStyle}>{pretty(sessionResult)}</pre>}
+
+        <h3 style={{ marginTop: 16 }}>Last Sample Metrics</h3>
+        {lastMetrics ? <pre style={preStyle}>{pretty(lastMetrics)}</pre> : <div>Not available yet.</div>}
+
+        {showRawEvents && lastRawEvents && (
+          <>
+            <h3 style={{ marginTop: 16 }}>Raw Events (dev)</h3>
+            <pre style={preStyle}>{pretty(lastRawEvents)}</pre>
           </>
         )}
       </div>

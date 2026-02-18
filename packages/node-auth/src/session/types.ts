@@ -1,8 +1,9 @@
-import type { LocationResult, NetworkResult } from "@securekit/core";
+import type { KeystrokeSample, LocationResult, NetworkResult } from "@securekit/core";
 
 export type SessionSignals = {
   network?: NetworkResult;
   location?: LocationResult;
+  keystroke?: KeystrokeSample;
 };
 
 export type SessionRecord = {

@@ -70,6 +70,41 @@ describe("SecureKitClient session methods", () => {
       signalsUsed: {
         network: CLEAN_NETWORK,
         location: CLEAN_LOCATION,
+        keystroke: {
+          similarityScore: 0.82,
+          distance: 0.2,
+          decision: "allow",
+          reasons: [],
+          sampleMetrics: {
+            holdMeanMs: 90,
+            holdStdMs: 10,
+            holdMedianMs: 89,
+            flightMeanMs: 50,
+            flightStdMs: 9,
+            flightMedianMs: 48,
+            ddMeanMs: 51,
+            ddStdMs: 8,
+            ddMedianMs: 50,
+            udMeanMs: 45,
+            udStdMs: 7,
+            udMedianMs: 44,
+            uuMeanMs: 53,
+            uuStdMs: 8,
+            uuMedianMs: 52,
+            typingSpeedCharsPerSec: 4,
+            errorRate: 0.01,
+            backspaceRate: 0.02,
+            digraphCount: 11,
+            keystrokeCount: 12,
+            eventCount: 24,
+            durationMs: 700,
+          },
+          thresholds: {
+            allowThreshold: 0.76,
+            stepUpThreshold: 0.56,
+            denyThreshold: 0.36,
+          },
+        },
       },
     };
     const fetchMock = vi.fn(async () => jsonResponse(responseFixture));
@@ -80,8 +115,20 @@ describe("SecureKitClient session methods", () => {
 
     const payload = {
       sessionId: "s1",
+      userId: "u1",
       policy: { allowedCountries: ["TR"] },
-      signals: { network: CLEAN_NETWORK, location: CLEAN_LOCATION },
+      signals: {
+        network: CLEAN_NETWORK,
+        location: CLEAN_LOCATION,
+        keystroke: {
+          events: [
+            { code: "KeyA", type: "down" as const, t: 0, expectedIndex: 0 },
+            { code: "KeyA", type: "up" as const, t: 100, expectedIndex: 0 },
+          ],
+          expectedText: "a",
+          typedLength: 1,
+        },
+      },
     };
 
     const result = await client.verifySession(payload);

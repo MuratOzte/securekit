@@ -3,6 +3,7 @@ export * from "./contracts/verify";
 export * from "./contracts/session";
 export * from "./contracts/consent";
 export * from "./contracts/enrollment";
+export * from "./contracts/keystroke";
 export * from "./contracts/userProfiles";
 export type {
   ChallengeLang,
@@ -13,6 +14,8 @@ export type {
   ConsumeChallengeResponse,
 } from "./contracts/challenge";
 export * from "./biometrics/keystrokeProfile";
+export * from "./biometrics/keystrokeMetrics";
+export * from "./biometrics/keystrokeScoring";
 export * from "./orchestrator";
 export * from "./policies.defaultPolicy";
 export * from "./risk/aggregate";
