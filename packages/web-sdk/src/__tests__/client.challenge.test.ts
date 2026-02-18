@@ -26,6 +26,7 @@ describe("SecureKitClient challenge methods", () => {
     const result = await client.getTextChallenge({
       lang: "tr",
       length: "short",
+      wordCount: 6,
     });
 
     expect(result).toEqual(fixture);
@@ -34,6 +35,6 @@ describe("SecureKitClient challenge methods", () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url.endsWith("/challenge/text")).toBe(true);
     expect(init.method).toBe("POST");
-    expect(init.body).toBe(JSON.stringify({ lang: "tr", length: "short" }));
+    expect(init.body).toBe(JSON.stringify({ lang: "tr", length: "short", wordCount: 6 }));
   });
 });

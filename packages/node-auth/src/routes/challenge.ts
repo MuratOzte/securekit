@@ -14,6 +14,7 @@ import type { ChallengeStore } from "../challenge/store";
 import type { ChallengeRecord } from "../challenge/types";
 
 const DEFAULT_CHALLENGE_TTL_SECONDS = 120;
+const MAX_WORD_COUNT = 64;
 
 export interface CreateChallengeRouterArgs {
   challengeStore: ChallengeStore;
@@ -66,6 +67,13 @@ function parseLength(value: unknown): ChallengeLength | null {
   return value === "short" || value === "medium" || value === "long" ? value : null;
 }
 
+function parseWordCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const normalized = Math.round(value);
+  if (normalized < 1 || normalized > MAX_WORD_COUNT) return null;
+  return normalized;
+}
+
 function parseChallengeTextRequest(body: unknown): ChallengeTextRequest | null {
   if (body === undefined || body === null) return {};
   if (!isRecord(body)) return null;
@@ -82,6 +90,12 @@ function parseChallengeTextRequest(body: unknown): ChallengeTextRequest | null {
     const length = parseLength(body.length);
     if (!length) return null;
     request.length = length;
+  }
+
+  if (body.wordCount !== undefined) {
+    const wordCount = parseWordCount(body.wordCount);
+    if (!wordCount) return null;
+    request.wordCount = wordCount;
   }
 
   if (body.sessionId !== undefined) {
@@ -145,6 +159,7 @@ export function createChallengeRouter(args: CreateChallengeRouterArgs) {
       lang,
       length,
       rng,
+      wordCount: requestBody.wordCount,
     });
     const record = buildRecord({
       challengeId,

@@ -284,7 +284,7 @@ function parseKeystrokeEvent(
   }
 
   const key = input.key;
-  if (key !== undefined && (typeof key !== "string" || key.trim().length === 0)) {
+  if (key !== undefined && (typeof key !== "string" || key.length === 0)) {
     fieldErrors[`${prefix}[${index}].key`] = "key must be a non-empty string when provided.";
   }
 
@@ -329,7 +329,7 @@ function parseKeystrokeEvent(
   }
 
   return {
-    ...(typeof key === "string" && key.trim().length > 0 ? { key: key.trim() } : {}),
+    ...(typeof key === "string" && key.length > 0 ? { key } : {}),
     ...(typeof code === "string" && code.trim().length > 0 ? { code: code.trim() } : {}),
     type: type as KeystrokeEvent["type"],
     t: t as number,

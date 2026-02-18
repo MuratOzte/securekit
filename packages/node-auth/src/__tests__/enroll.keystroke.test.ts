@@ -20,6 +20,15 @@ const EVENTS: KeystrokeEvent[] = [
   { key: "e", type: "up", t: 630 },
 ];
 
+const SPACE_EVENTS: KeystrokeEvent[] = [
+  { key: "h", type: "down", t: 0 },
+  { key: "h", type: "up", t: 70 },
+  { key: " ", code: "Space", type: "down", t: 110 },
+  { key: " ", code: "Space", type: "up", t: 150 },
+  { key: "i", type: "down", t: 200 },
+  { key: "i", type: "up", t: 290 },
+];
+
 describe("keystroke enrollment endpoint", () => {
   it("returns CONSENT_REQUIRED when enrollment is attempted without consent", async () => {
     const app = createApp({
@@ -100,5 +109,30 @@ describe("keystroke enrollment endpoint", () => {
     expect(first.body.profile.updatedAt).toBe(NOW);
     expect(second.body.profile.createdAt).toBe(NOW);
     expect(second.body.profile.updatedAt).toBe(NOW_2);
+  });
+
+  it("accepts raw space key events in sample payload", async () => {
+    const app = createApp({
+      storage: new InMemoryAdapter(),
+      nowFnIso: () => NOW,
+    });
+
+    await request(app).post("/consent").send({
+      userId: "u1",
+      consentVersion: "v1",
+    });
+
+    const response = await request(app).post("/enroll/keystroke").send({
+      userId: "u1",
+      sample: {
+        events: SPACE_EVENTS,
+        expectedText: "h i",
+        typedLength: 3,
+        source: "collector_v1",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
   });
 });

@@ -67,6 +67,24 @@ describe("challenge text endpoints", () => {
     expect(Date.parse(response.body.expiresAt)).toBe(NOW_BASE_MS + 120_000);
   });
 
+  it("POST /challenge/text supports numeric wordCount", async () => {
+    const { app } = createDeterministicApp();
+
+    const response = await request(app).post("/challenge/text").send({
+      lang: "en",
+      wordCount: 4,
+    });
+
+    const words = String(response.body.text)
+      .trim()
+      .split(/\s+/)
+      .filter((word) => word.length > 0);
+
+    expect(response.status).toBe(200);
+    expect(response.body.lang).toBe("en");
+    expect(words).toHaveLength(4);
+  });
+
   it("POST /challenge/text/consume enforces single-use behavior", async () => {
     const { app } = createDeterministicApp();
 

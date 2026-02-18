@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChallengeLang,
-  ChallengeLength,
   ChallengeTextResponse,
   KeystrokeEvent,
   KeystrokeSampleMetrics,
@@ -9,11 +8,13 @@ import type {
 import {
   buildKeystrokeSample,
   createKeystrokeCollector,
+  HttpError,
   type ConsentResponse,
   type DeleteBiometricsResponse,
   type EnrollKeystrokeResponse,
   type GetProfilesResponse,
   type VerifyKeystrokeResponse,
+  type VerifySessionRequest,
   type VerifySessionResponse,
 } from "@securekit/web-sdk";
 import {
@@ -61,6 +62,47 @@ function parseNumber(value: string, fallback: number, min = 0, max = Number.POSI
   return Math.max(min, Math.min(max, parsed));
 }
 
+function splitWords(text: string): string[] {
+  return text
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+}
+
+function resolveCompletedWordCount(expectedWords: string[], typedValue: string): number {
+  if (expectedWords.length === 0) return 0;
+
+  let cursor = 0;
+  let completed = 0;
+
+  for (let index = 0; index < expectedWords.length; index += 1) {
+    const word = expectedWords[index];
+    const typedWord = typedValue.slice(cursor, cursor + word.length);
+
+    if (typedWord !== word) {
+      return completed;
+    }
+
+    cursor += word.length;
+    completed = index + 1;
+
+    if (index < expectedWords.length - 1) {
+      if (typedValue[cursor] === " ") {
+        cursor += 1;
+        continue;
+      }
+      if (cursor === typedValue.length) {
+        return completed;
+      }
+      if (typedValue[cursor] !== " ") {
+        return completed - 1;
+      }
+    }
+  }
+
+  return completed;
+}
+
 function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -98,7 +140,7 @@ export const SecureKitPlayground: React.FC = () => {
   const [userId, setUserId] = usePersistentState("securekit.playground.userId", "demo-user-1");
   const [consentVersion, setConsentVersion] = usePersistentState("securekit.playground.consentVersion", "v1");
   const [challengeLang, setChallengeLang] = usePersistentState<ChallengeLang>("securekit.playground.challengeLang", "en");
-  const [challengeLength, setChallengeLength] = usePersistentState<ChallengeLength>("securekit.playground.challengeLength", "short");
+  const [challengeWordCountInput, setChallengeWordCountInput] = usePersistentState("securekit.playground.challengeWordCount", "6");
   const [targetRoundsInput, setTargetRoundsInput] = usePersistentState("securekit.playground.targetRounds", "10");
   const [showRawEvents, setShowRawEvents] = usePersistentState("securekit.playground.showRawEvents", false);
   const [deleteConsent, setDeleteConsent] = usePersistentState("securekit.playground.deleteConsent", false);
@@ -121,6 +163,8 @@ export const SecureKitPlayground: React.FC = () => {
   const [enrollResult, setEnrollResult] = useState<EnrollKeystrokeResponse | null>(null);
   const [enrollChallenge, setEnrollChallenge] = useState<ChallengeTextResponse | null>(null);
   const [enrollTyped, setEnrollTyped] = useState("");
+  const [enrollWordInput, setEnrollWordInput] = useState("");
+  const [enrollWordIndex, setEnrollWordIndex] = useState(0);
   const [enrollRoundsCompleted, setEnrollRoundsCompleted] = useState(0);
 
   const [verifyBusy, setVerifyBusy] = useState<SectionBusy>("idle");
@@ -128,6 +172,8 @@ export const SecureKitPlayground: React.FC = () => {
   const [verifyResult, setVerifyResult] = useState<VerifyKeystrokeResponse | null>(null);
   const [verifyChallenge, setVerifyChallenge] = useState<ChallengeTextResponse | null>(null);
   const [verifyTyped, setVerifyTyped] = useState("");
+  const [verifyWordInput, setVerifyWordInput] = useState("");
+  const [verifyWordIndex, setVerifyWordIndex] = useState(0);
 
   const [profilesBusy, setProfilesBusy] = useState<SectionBusy>("idle");
   const [profilesError, setProfilesError] = useState<string | null>(null);
@@ -146,16 +192,38 @@ export const SecureKitPlayground: React.FC = () => {
   const verifyCollectorRef = useRef<CollectorApi | null>(null);
 
   const targetRounds = Math.max(1, Math.round(parseNumber(targetRoundsInput, 10, 1, 50)));
+  const challengeWordCount = Math.max(1, Math.round(parseNumber(challengeWordCountInput, 6, 1, 40)));
   const allowThreshold = parseNumber(allowThresholdInput, 0.76, 0, 1);
   const stepUpThreshold = parseNumber(stepUpThresholdInput, 0.56, 0, 1);
   const denyThreshold = parseNumber(denyThresholdInput, 0.36, 0, 1);
+
+  const enrollChallengeWords = useMemo(
+    () => splitWords(enrollChallenge?.text ?? ""),
+    [enrollChallenge?.challengeId, enrollChallenge?.text]
+  );
+
+  const enrollCurrentWordIndex =
+    enrollChallengeWords.length > 0
+      ? Math.min(enrollWordIndex, enrollChallengeWords.length - 1)
+      : 0;
+  const enrollCurrentWord = enrollChallengeWords[enrollCurrentWordIndex] ?? "";
+
+  const verifyChallengeWords = useMemo(
+    () => splitWords(verifyChallenge?.text ?? ""),
+    [verifyChallenge?.challengeId, verifyChallenge?.text]
+  );
+
+  const verifyCurrentWordIndex =
+    verifyChallengeWords.length > 0
+      ? Math.min(verifyWordIndex, verifyChallengeWords.length - 1)
+      : 0;
+  const verifyCurrentWord = verifyChallengeWords[verifyCurrentWordIndex] ?? "";
 
   useEffect(() => {
     const input = enrollInputRef.current;
     if (!input || !enrollChallenge) return undefined;
 
     const collector = createKeystrokeCollector(input, {
-      expectedText: enrollChallenge.text,
       includeBackspace: true,
       includeEnter: false,
       includeRawKey: showRawEvents,
@@ -171,11 +239,18 @@ export const SecureKitPlayground: React.FC = () => {
   }, [enrollChallenge?.challengeId, showRawEvents]);
 
   useEffect(() => {
+    if (!enrollChallenge) return;
+    const input = enrollInputRef.current;
+    if (!input) return;
+    input.focus();
+    enrollCollectorRef.current?.start();
+  }, [enrollChallenge?.challengeId]);
+
+  useEffect(() => {
     const input = verifyInputRef.current;
     if (!input || !verifyChallenge) return undefined;
 
     const collector = createKeystrokeCollector(input, {
-      expectedText: verifyChallenge.text,
       includeBackspace: true,
       includeEnter: false,
       includeRawKey: showRawEvents,
@@ -189,6 +264,14 @@ export const SecureKitPlayground: React.FC = () => {
       }
     };
   }, [verifyChallenge?.challengeId, showRawEvents]);
+
+  useEffect(() => {
+    if (!verifyChallenge) return;
+    const input = verifyInputRef.current;
+    if (!input) return;
+    input.focus();
+    verifyCollectorRef.current?.start();
+  }, [verifyChallenge?.challengeId]);
 
   const runConsent = async () => {
     const normalizedUserId = userId.trim();
@@ -223,16 +306,20 @@ export const SecureKitPlayground: React.FC = () => {
   const getChallenge = async () =>
     client.getTextChallenge({
       lang: challengeLang,
-      length: challengeLength,
+      wordCount: challengeWordCount,
     });
 
   const startEnrollment = async () => {
     setEnrollBusy("loading");
     setEnrollError(null);
+    setEnrollRoundsCompleted(0);
+    setEnrollResult(null);
     try {
       const challenge = await getChallenge();
       setEnrollChallenge(challenge);
       setEnrollTyped("");
+      setEnrollWordInput("");
+      setEnrollWordIndex(0);
       enrollCollectorRef.current?.reset();
     } catch (error) {
       setEnrollError(formatSecureKitError(error, baseUrl));
@@ -241,7 +328,7 @@ export const SecureKitPlayground: React.FC = () => {
     }
   };
 
-  const submitEnrollment = async () => {
+  const submitEnrollment = async (typedTextOverride?: string) => {
     const normalizedUserId = userId.trim();
     if (!normalizedUserId || !enrollChallenge || !enrollCollectorRef.current) return;
 
@@ -257,9 +344,14 @@ export const SecureKitPlayground: React.FC = () => {
         return;
       }
 
+      const typedLength =
+        typeof typedTextOverride === "string"
+          ? typedTextOverride.length
+          : snapshot.typedLength;
+
       const sample = buildKeystrokeSample(snapshot.events, enrollChallenge.text, {
         challengeId: enrollChallenge.challengeId,
-        typedLength: snapshot.typedLength,
+        typedLength,
         errorCount: snapshot.errorCount,
         backspaceCount: snapshot.backspaceCount,
         ignoredEventCount: snapshot.ignoredEventCount,
@@ -271,7 +363,7 @@ export const SecureKitPlayground: React.FC = () => {
         challengeId: enrollChallenge.challengeId,
         sample,
         expectedText: enrollChallenge.text,
-        typedLength: snapshot.typedLength,
+        typedLength,
         errorCount: snapshot.errorCount,
         backspaceCount: snapshot.backspaceCount,
         imeCompositionUsed: snapshot.imeCompositionUsed,
@@ -281,17 +373,21 @@ export const SecureKitPlayground: React.FC = () => {
       setLastMetrics(result.sampleMetrics ?? null);
       setLastRawEvents(showRawEvents ? snapshot.events : null);
 
-      const completed = result.enrollmentProgress?.roundsCompleted ?? enrollRoundsCompleted + 1;
+      const completed = enrollRoundsCompleted + 1;
       setEnrollRoundsCompleted(completed);
 
-      const ready = result.enrollmentProgress?.ready ?? completed >= targetRounds;
+      const ready = completed >= targetRounds;
       if (ready) {
         setEnrollChallenge(null);
         setEnrollTyped("");
+        setEnrollWordInput("");
+        setEnrollWordIndex(0);
       } else {
         const nextChallenge = await getChallenge();
         setEnrollChallenge(nextChallenge);
         setEnrollTyped("");
+        setEnrollWordInput("");
+        setEnrollWordIndex(0);
         collector.reset();
       }
     } catch (error) {
@@ -310,6 +406,8 @@ export const SecureKitPlayground: React.FC = () => {
       const challenge = await getChallenge();
       setVerifyChallenge(challenge);
       setVerifyTyped("");
+      setVerifyWordInput("");
+      setVerifyWordIndex(0);
       verifyCollectorRef.current?.reset();
     } catch (error) {
       setVerifyError(formatSecureKitError(error, baseUrl));
@@ -318,7 +416,7 @@ export const SecureKitPlayground: React.FC = () => {
     }
   };
 
-  const submitVerification = async () => {
+  const submitVerification = async (typedTextOverride?: string) => {
     const normalizedUserId = userId.trim();
     if (!normalizedUserId || !verifyChallenge || !verifyCollectorRef.current) return;
 
@@ -334,9 +432,14 @@ export const SecureKitPlayground: React.FC = () => {
         return;
       }
 
+      const typedLength =
+        typeof typedTextOverride === "string"
+          ? typedTextOverride.length
+          : snapshot.typedLength;
+
       const sample = buildKeystrokeSample(snapshot.events, verifyChallenge.text, {
         challengeId: verifyChallenge.challengeId,
-        typedLength: snapshot.typedLength,
+        typedLength,
         errorCount: snapshot.errorCount,
         backspaceCount: snapshot.backspaceCount,
         ignoredEventCount: snapshot.ignoredEventCount,
@@ -365,25 +468,44 @@ export const SecureKitPlayground: React.FC = () => {
         setSessionError(null);
         try {
           const decision = (result.decision as KeystrokeDecision) === "step_up" ? "keystroke" : "keystroke";
-          setSessionResult(
-            await client.verifySession({
-              sessionId: sessionId.trim(),
-              userId: normalizedUserId,
-              policy: {
-                stepUpSteps: [decision],
-                keystroke: {
-                  enabled: true,
-                  allowThreshold,
-                  stepUpThreshold,
-                  denyThreshold,
-                  updateProfileOnAllow: true,
-                },
+          const payload: Omit<VerifySessionRequest, "sessionId"> = {
+            userId: normalizedUserId,
+            policy: {
+              stepUpSteps: [decision],
+              keystroke: {
+                enabled: true,
+                allowThreshold,
+                stepUpThreshold,
+                denyThreshold,
+                updateProfileOnAllow: true,
               },
-              signals: {
-                keystroke: sample,
-              },
-            })
-          );
+            },
+            signals: {
+              keystroke: sample,
+            },
+          };
+
+          const verifyWithSession = (activeSessionId: string) =>
+            client.verifySession({
+              sessionId: activeSessionId,
+              ...payload,
+            });
+
+          const currentSessionId = sessionId.trim();
+          let sessionResponse: VerifySessionResponse;
+          try {
+            sessionResponse = await verifyWithSession(currentSessionId);
+          } catch (error) {
+            if (error instanceof HttpError && (error.status === 404 || error.status === 410)) {
+              const started = await client.startSession();
+              setSessionId(started.sessionId);
+              sessionResponse = await verifyWithSession(started.sessionId);
+            } else {
+              throw error;
+            }
+          }
+
+          setSessionResult(sessionResponse);
         } catch (error) {
           setSessionError(formatSecureKitError(error, baseUrl));
         } finally {
@@ -393,6 +515,8 @@ export const SecureKitPlayground: React.FC = () => {
 
       setVerifyChallenge(null);
       setVerifyTyped("");
+      setVerifyWordInput("");
+      setVerifyWordIndex(0);
     } catch (error) {
       setVerifyError(formatSecureKitError(error, baseUrl));
     } finally {
@@ -451,16 +575,68 @@ export const SecureKitPlayground: React.FC = () => {
   };
 
   const onEnrollChange = (value: string) => {
-    setEnrollTyped(value);
-    if (enrollBusy === "idle" && enrollChallenge && value === enrollChallenge.text) {
-      void submitEnrollment();
+    setEnrollWordInput(value);
+  };
+
+  const onEnrollKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (enrollBusy !== "idle" || !enrollChallenge) return;
+
+    const expectedWord = enrollChallengeWords[enrollWordIndex];
+    if (!expectedWord) return;
+
+    const typedWord = enrollWordInput.trim();
+    if (!typedWord) return;
+    if (typedWord !== expectedWord) {
+      setEnrollError(`Expected word: "${expectedWord}"`);
+      return;
+    }
+
+    setEnrollError(null);
+    const nextTyped = enrollTyped.length > 0 ? `${enrollTyped} ${typedWord}` : typedWord;
+    const nextWordIndex = enrollWordIndex + 1;
+    setEnrollTyped(nextTyped);
+    setEnrollWordInput("");
+    setEnrollWordIndex(nextWordIndex);
+
+    if (nextWordIndex >= enrollChallengeWords.length) {
+      window.setTimeout(() => {
+        void submitEnrollment(nextTyped);
+      }, 0);
     }
   };
 
   const onVerifyChange = (value: string) => {
-    setVerifyTyped(value);
-    if (verifyBusy === "idle" && verifyChallenge && value === verifyChallenge.text) {
-      void submitVerification();
+    setVerifyWordInput(value);
+  };
+
+  const onVerifyKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (verifyBusy !== "idle" || !verifyChallenge) return;
+
+    const expectedWord = verifyChallengeWords[verifyWordIndex];
+    if (!expectedWord) return;
+
+    const typedWord = verifyWordInput.trim();
+    if (!typedWord) return;
+    if (typedWord !== expectedWord) {
+      setVerifyError(`Expected word: "${expectedWord}"`);
+      return;
+    }
+
+    setVerifyError(null);
+    const nextTyped = verifyTyped.length > 0 ? `${verifyTyped} ${typedWord}` : typedWord;
+    const nextWordIndex = verifyWordIndex + 1;
+    setVerifyTyped(nextTyped);
+    setVerifyWordInput("");
+    setVerifyWordIndex(nextWordIndex);
+
+    if (nextWordIndex >= verifyChallengeWords.length) {
+      window.setTimeout(() => {
+        void submitVerification(nextTyped);
+      }, 0);
     }
   };
 
@@ -497,12 +673,16 @@ export const SecureKitPlayground: React.FC = () => {
             </select>
           </label>
           <label>
-            length:
-            <select value={challengeLength} onChange={(event) => setChallengeLength(event.target.value as ChallengeLength)} style={{ marginLeft: 8 }}>
-              <option value="short">short</option>
-              <option value="medium">medium</option>
-              <option value="long">long</option>
-            </select>
+            length (words):
+            <input
+              type="number"
+              min={1}
+              max={40}
+              step={1}
+              value={challengeWordCountInput}
+              onChange={(event) => setChallengeWordCountInput(event.target.value)}
+              style={{ marginLeft: 8, width: 70 }}
+            />
           </label>
           <label>
             target rounds:
@@ -526,19 +706,26 @@ export const SecureKitPlayground: React.FC = () => {
           <button onClick={() => void startEnrollment()} disabled={enrollBusy !== "idle"}>
             {enrollBusy === "loading" ? "Working..." : "Start Enrollment Challenge"}
           </button>
-          <div>progress: {enrollRoundsCompleted}/{targetRounds}</div>
+          <div>progress: {Math.min(enrollRoundsCompleted, targetRounds)}/{targetRounds}</div>
         </div>
         {enrollChallenge && (
           <>
-            <div style={{ marginTop: 8 }}>challenge: <code>{enrollChallenge.text}</code></div>
+            <div style={{ marginTop: 8 }}>
+              word {Math.min(enrollWordIndex + 1, enrollChallengeWords.length)}/{enrollChallengeWords.length}:{" "}
+              <code>{enrollCurrentWord || "-"}</code>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
+              Press space to move to the next word.
+            </div>
             <input
               ref={enrollInputRef}
-              value={enrollTyped}
+              value={enrollWordInput}
               onChange={(event) => onEnrollChange(event.target.value)}
+              onKeyDown={onEnrollKeyDown}
               onFocus={() => enrollCollectorRef.current?.start()}
               onBlur={() => enrollCollectorRef.current?.stop()}
               style={{ marginTop: 8, width: "100%", maxWidth: 760 }}
-              placeholder="Type exactly as shown"
+              placeholder="Type current word, press space"
             />
           </>
         )}
@@ -563,15 +750,22 @@ export const SecureKitPlayground: React.FC = () => {
         </div>
         {verifyChallenge && (
           <>
-            <div style={{ marginTop: 8 }}>challenge: <code>{verifyChallenge.text}</code></div>
+            <div style={{ marginTop: 8 }}>
+              word {Math.min(verifyWordIndex + 1, verifyChallengeWords.length)}/{verifyChallengeWords.length}:{" "}
+              <code>{verifyCurrentWord || "-"}</code>
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
+              Press space to move to the next word.
+            </div>
             <input
               ref={verifyInputRef}
-              value={verifyTyped}
+              value={verifyWordInput}
               onChange={(event) => onVerifyChange(event.target.value)}
+              onKeyDown={onVerifyKeyDown}
               onFocus={() => verifyCollectorRef.current?.start()}
               onBlur={() => verifyCollectorRef.current?.stop()}
               style={{ marginTop: 8, width: "100%", maxWidth: 760 }}
-              placeholder="Type exactly as shown"
+              placeholder="Type current word, press space"
             />
           </>
         )}

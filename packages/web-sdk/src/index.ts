@@ -271,6 +271,7 @@ export class SecureKitClient {
     const body = {
       lang: options.lang,
       length: options.length,
+      wordCount: options.wordCount,
       sessionId: options.sessionId,
     };
 

@@ -6,6 +6,7 @@ export type ChallengeLength = "short" | "medium" | "long";
 export type ChallengeTextRequest = {
   lang?: ChallengeLang;
   length?: ChallengeLength;
+  wordCount?: number;
   sessionId?: string;
 };
 

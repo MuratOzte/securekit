@@ -77,6 +77,7 @@ const LENGTH_RANGE: Record<ChallengeLength, [number, number]> = {
 };
 
 export type Rng = () => number;
+const MAX_WORD_COUNT = 64;
 
 function toRandomUnit(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -94,13 +95,21 @@ function pickCount(length: ChallengeLength, rng: Rng): number {
   return min + pickIndex(max - min + 1, rng);
 }
 
+function normalizeWordCount(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const normalized = Math.round(value);
+  if (normalized < 1 || normalized > MAX_WORD_COUNT) return undefined;
+  return normalized;
+}
+
 export function generateChallengeText(opts: {
   lang: ChallengeLang;
   length: ChallengeLength;
   rng: Rng;
+  wordCount?: number;
 }): string {
   const words = opts.lang === "tr" ? TR_WORDS : EN_WORDS;
-  const count = pickCount(opts.length, opts.rng);
+  const count = normalizeWordCount(opts.wordCount) ?? pickCount(opts.length, opts.rng);
   const parts: string[] = [];
 
   for (let i = 0; i < count; i += 1) {
