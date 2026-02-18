@@ -3,8 +3,13 @@ import requests
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from dotenv import load_dotenv
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:
+    ZoneInfo = None  # Eski Python ise timezone offset'i hesaplayamayız
 
 load_dotenv()
 
@@ -16,7 +21,7 @@ if not API_KEY:
 
 @dataclass
 class IpInfo:
-    ip: str | None
+    ip: Optional[str]
     security: dict
     location: dict
     network: dict
@@ -36,10 +41,32 @@ def fetch_ip_info(ip: str) -> IpInfo:
     )
 
 
+def compute_utc_offset_minutes(time_zone: Optional[str]) -> Optional[int]:
+    """
+    location.time_zone (örn: 'Europe/Istanbul') bilgisinden,
+    o anki UTC offset'i dakika cinsinden hesapla.
+    Örn: UTC+3 -> 180
+    """
+    if not time_zone or ZoneInfo is None:
+        return None
+
+    try:
+        now = datetime.now(ZoneInfo(time_zone))
+        offset = now.utcoffset()
+        if offset is None:
+            return None
+        return int(offset.total_seconds() // 60)
+    except Exception:
+        return None
+
+
 def slim_ip_info(ip_info: IpInfo) -> Dict[str, Any]:
     """Gereksiz alanları kırpılmış, sade bir ip_info döndür."""
     security = ip_info.security or {}
     location = ip_info.location or {}
+
+    tz_name = location.get("time_zone")
+    utc_offset_minutes = compute_utc_offset_minutes(tz_name)
 
     return {
         "ip": ip_info.ip,
@@ -54,18 +81,19 @@ def slim_ip_info(ip_info: IpInfo) -> Dict[str, Any]:
             "region": location.get("region"),
             "country": location.get("country"),
             "country_code": location.get("country_code"),
-            "time_zone": location.get("time_zone"),
+            "time_zone": tz_name,
+            "utc_offset_minutes": utc_offset_minutes,
         },
         # network, latitude/longitude, continent vs. BİLİNÇLİ OLARAK YOK
     }
 
 
-def check_ip_country(ip: str, expected_country_code: str | None) -> Dict[str, Any]:
+def check_ip_country(ip: str, expected_country_code: Optional[str]) -> Dict[str, Any]:
     ip_info = fetch_ip_info(ip)
     slim = slim_ip_info(ip_info)
 
     ip_country = slim["location"].get("country_code")
-    same_country: bool | None = None
+    same_country: Optional[bool] = None
 
     if ip_country is not None and expected_country_code is not None:
         same_country = ip_country.upper() == expected_country_code.upper()
@@ -81,11 +109,15 @@ def check_ip_country(ip: str, expected_country_code: str | None) -> Dict[str, An
 def main() -> int:
     if len(sys.argv) < 2:
         print(
-            "Usage: python ip_check.py <ip> [expected_country_code]", file=sys.stderr)
+            "Usage: python ip_check.py <ip> [expected_country_code]",
+            file=sys.stderr,
+        )
         return 1
 
     ip = sys.argv[1]
     expected_country = sys.argv[2] if len(sys.argv) > 2 else None
+
+    print(f"[ip_check] ip={ip!r}, expected={expected_country!r}", file=sys.stderr)
 
     result = check_ip_country(ip, expected_country)
     print(json.dumps(result, ensure_ascii=False))

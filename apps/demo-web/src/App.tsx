@@ -1,7 +1,7 @@
 // apps/demo-web/src/App.tsx
 
 import React from "react";
-import { LocationCheckTester } from "./components/LocationCheckTester"; // .js uzantısı önemli
+import { LocationCheckTester } from "./components/LocationCheckTester.js"; // .js uzantısı önemli
 
 function App() {
   return (

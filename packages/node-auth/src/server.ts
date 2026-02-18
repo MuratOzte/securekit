@@ -4,9 +4,18 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 interface VpnClientMetadata {
     clientTimeZone: string | null;
     clientTimeOffsetMinutes: number | null;
+}
+
+interface VerificationResult {
+  ok: boolean;
+  score: number;
+  details?: unknown;
 }
 
 interface VpnCheckResultDetails extends VpnClientMetadata {
@@ -17,69 +26,44 @@ interface VpnCheckResultDetails extends VpnClientMetadata {
     isVpn: boolean;
     isProxy: boolean;
     isTor: boolean;
+    isRelay: boolean;
     timezoneDriftHours: number | null;
     source: string | null;
+    ipInfo?: unknown;
 }
 
-interface VerificationResult {
-    ok: boolean;
-    score: number;
-    details?: any;
+interface LocationCountryResultDetails {
+    ip: string | null;
+    ipCountryCode: string | null;
+    expectedCountryCode: string | null;
+    clientCountryCode: string | null;
+    matchesExpectedCountry: boolean | null;
+    matchesClientCountry: boolean | null;
+    reason: string | null;
+    ipInfo?: unknown;
+    security: {
+        vpn: boolean | null;
+        proxy: boolean | null;
+        tor: boolean | null;
+        relay: boolean | null;
+    };
 }
 
 interface LocationCountryResult extends VerificationResult {
     ipCountryCode: string | null;
     expectedCountryCode: string | null;
     clientCountryCode: string | null;
-    details?: {
-        ip: string | null;
-        ipCountryCode: string | null;
-        expectedCountryCode: string | null;
-        clientCountryCode: string | null;
-        reason: string | null;
-        ipInfo?: unknown;
-    };
+    details?: LocationCountryResultDetails;
 }
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-// Sağlık kontrolü
-app.get('/health', (_req: Request, res: Response) => {
-    res.json({ ok: true });
-});
+// --------------------------------------------------
+// Helpers
+// --------------------------------------------------
 
-// Passkey / WebAuthn stub
-app.post('/verify/webauthn:passkey', (req: Request, res: Response) => {
-    const { proof } = req.body ?? {};
-    const ok = !!proof;
-
-    const result: VerificationResult = {
-        ok,
-        score: ok ? 1 : 0,
-    };
-
-    res.json(result);
-});
-
-// Face liveness stub
-app.post('/verify/face:liveness', (req: Request, res: Response) => {
-    const { proof, metrics } = req.body ?? {};
-    const ok = proof?.tasksOk === true && (metrics?.quality ?? 0) > 0.8;
-
-    const result: VerificationResult = {
-        ok,
-        score: ok ? 1 : 0,
-    };
-
-    res.json(result);
-});
-
-// İstemci IP'sini çıkar
 function getClientIp(req: Request): string | null {
     const xfwd = req.headers['x-forwarded-for'];
 
@@ -95,16 +79,17 @@ function getClientIp(req: Request): string | null {
 
     console.log('[node-auth] RAW client IP:', ip);
 
-    // GELİŞTİRME için override: localhost ise sabit gerçek bir IP kullan
-    if (ip === '::1' || ip === '127.0.0.1') {
-        ip = '8.8.8.8'; // sadece test için
-        console.log('[node-auth] OVERRIDDEN IP for Python:', ip);
+    // Dev ortamı için localhost override
+    if (process.env.NODE_ENV !== 'production') {
+        if (ip === '::1' || ip === '127.0.0.1') {
+            ip = '8.8.8.8'; // test için sabit IP
+            console.log('[node-auth] OVERRIDDEN IP for Python:', ip);
+        }
     }
 
     return ip;
 }
 
-// Body'den timezone metadata'sını oku (VPN için)
 function parseVpnClientMetadata(req: Request): VpnClientMetadata {
     const body = req.body ?? {};
     const clientTimeZone =
@@ -117,66 +102,6 @@ function parseVpnClientMetadata(req: Request): VpnClientMetadata {
     return { clientTimeZone, clientTimeOffsetMinutes };
 }
 
-// Şimdilik fake VPN risk motoru (Python yok)
-function fakeVpnRiskEngine(
-    ip: string | null,
-    meta: VpnClientMetadata
-): VerificationResult {
-    const ipTimeZone = 'Europe/Berlin';
-    const ipCountry = 'DE';
-    const ipRegion = 'Berlin';
-
-    let timezoneDriftHours: number | null = null;
-    if (meta.clientTimeZone) {
-        timezoneDriftHours = meta.clientTimeZone === ipTimeZone ? 0 : 2;
-    }
-
-    let score = 1.0;
-
-    const isVpn = false;
-    const isProxy = false;
-    const isTor = false;
-
-    if (timezoneDriftHours !== null) {
-        const drift = Math.abs(timezoneDriftHours);
-        if (drift > 3) {
-            score -= 0.6;
-        } else if (drift > 1) {
-            score -= 0.3;
-        }
-    }
-
-    if (score < 0) score = 0;
-    if (score > 1) score = 1;
-
-    const ok = score >= 0.5;
-
-    const details: VpnCheckResultDetails = {
-        ip,
-        ipTimeZone,
-        ipCountry,
-        ipRegion,
-        isVpn,
-        isProxy,
-        isTor,
-        timezoneDriftHours,
-        clientTimeZone: meta.clientTimeZone,
-        clientTimeOffsetMinutes: meta.clientTimeOffsetMinutes,
-        source: 'fake-vpn-engine',
-    };
-
-    return { ok, score, details };
-}
-
-// VPN/proxy/Tor + timezone check endpoint
-app.post('/verify/vpn:check', (req: Request, res: Response) => {
-    const ip = getClientIp(req);
-    const meta = parseVpnClientMetadata(req);
-    const result = fakeVpnRiskEngine(ip, meta);
-    res.json(result);
-});
-
-// Ülke kodu normalize
 function normalizeCountryCode(code: string | null): string | null {
     if (!code) return null;
     const trimmed = code.trim();
@@ -184,20 +109,27 @@ function normalizeCountryCode(code: string | null): string | null {
     return trimmed.toUpperCase();
 }
 
-// ip_check.py'yi child_process üzerinden çalıştır
 async function runIpCheckPython(
     ip: string,
     expectedCountryCode: string | null
 ): Promise<any> {
-    const scriptPath = path.resolve(__dirname, '../../../python/ip_check.py');
+    const projectRoot = path.resolve(__dirname, '../../../');
+    const scriptPath = path.join(projectRoot, 'python', 'ip_check.py');
+
     const args = [scriptPath, ip];
     if (expectedCountryCode) {
         args.push(expectedCountryCode);
     }
 
+    const pythonCommand =
+        process.env.PYTHON_CMD ||
+        (process.platform === 'win32' ? 'py' : 'python3');
+
+    console.log('[node-auth] Using python command:', pythonCommand, args);
+
     return new Promise((resolve, reject) => {
-        const proc = spawn('python', args, {
-            cwd: path.dirname(scriptPath), // .env'in yükleneceği klasör
+        const proc = spawn(pythonCommand, args, {
+            cwd: path.dirname(scriptPath),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 
@@ -238,7 +170,203 @@ async function runIpCheckPython(
     });
 }
 
-// Location Country check endpoint (Python entegrasyonlu)
+function computeTimezoneDriftHours(
+    ipOffsetMinutes: number | null,
+    clientOffsetMinutes: number | null
+): number | null {
+    if (
+        typeof ipOffsetMinutes !== 'number' ||
+        typeof clientOffsetMinutes !== 'number'
+    ) {
+        return null;
+    }
+    const diffMinutes = Math.abs(ipOffsetMinutes - clientOffsetMinutes);
+    return diffMinutes / 60;
+}
+
+// --------------------------------------------------
+// Health + other stubs
+// --------------------------------------------------
+
+app.get('/health', (_req: Request, res: Response) => {
+    res.json({ ok: true });
+});
+
+app.post('/verify/webauthn:passkey', (req: Request, res: Response) => {
+    const { proof } = req.body ?? {};
+    const ok = !!proof;
+
+    const result: VerificationResult = {
+        ok,
+        score: ok ? 1 : 0,
+    };
+
+    res.json(result);
+});
+
+app.post('/verify/face:liveness', (req: Request, res: Response) => {
+    const { proof, metrics } = req.body ?? {};
+    const ok = proof?.tasksOk === true && (metrics?.quality ?? 0) > 0.8;
+
+    const result: VerificationResult = {
+        ok,
+        score: ok ? 1 : 0,
+    };
+
+    res.json(result);
+});
+
+// --------------------------------------------------
+// /verify/vpn:check  (VPN/proxy/Tor + timezone drift)
+// --------------------------------------------------
+
+app.post('/verify/vpn:check', async (req: Request, res: Response) => {
+    const ip = getClientIp(req);
+    const meta = parseVpnClientMetadata(req);
+
+    if (!ip) {
+        const result: VerificationResult & { details: VpnCheckResultDetails } =
+            {
+                ok: false,
+                score: 0,
+                details: {
+                    ip: null,
+                    ipTimeZone: null,
+                    ipCountry: null,
+                    ipRegion: null,
+                    isVpn: false,
+                    isProxy: false,
+                    isTor: false,
+                    isRelay: false,
+                    timezoneDriftHours: null,
+                    clientTimeZone: meta.clientTimeZone,
+                    clientTimeOffsetMinutes: meta.clientTimeOffsetMinutes,
+                    source: 'ip_missing',
+                    ipInfo: null,
+                },
+            };
+        res.status(400).json(result);
+        return;
+    }
+
+    try {
+        const pyResult = await runIpCheckPython(ip, null);
+        const ipInfo = (pyResult?.ip_info ?? null) as any;
+
+        const security = (ipInfo?.security ?? {}) as any;
+        const location = (ipInfo?.location ?? {}) as any;
+
+        const vpn = security?.vpn === true || security?.vpn === true;
+        const proxy = security?.proxy === true || security?.proxy === true;
+        const tor = security?.tor === true || security?.tor === true;
+        const relay = security?.relay === true || security?.relay === true;
+
+        const ipTimeZone: string | null =
+            typeof location?.time_zone === 'string' ? location.time_zone : null;
+        const ipCountry: string | null =
+            typeof location?.country_code === 'string'
+                ? location.country_code
+                : null;
+        const ipRegion: string | null =
+            typeof location?.region === 'string'
+                ? location.region
+                : typeof location?.city === 'string'
+                  ? location.city
+                  : null;
+
+        const ipOffsetMinutes: number | null =
+            typeof location?.utc_offset_minutes === 'number'
+                ? location.utc_offset_minutes
+                : null;
+
+        const timezoneDriftHours = computeTimezoneDriftHours(
+            ipOffsetMinutes,
+            meta.clientTimeOffsetMinutes
+        );
+
+        // Base score
+        let score = 1.0;
+
+        // Timezone drift penalty
+        if (timezoneDriftHours !== null) {
+            if (timezoneDriftHours > 6) {
+                score -= 0.5;
+            } else if (timezoneDriftHours > 3) {
+                score -= 0.3;
+            } else if (timezoneDriftHours > 1) {
+                score -= 0.1;
+            }
+        }
+
+        // Security penalties
+        if (vpn) score -= 0.5;
+        if (proxy) score -= 0.3;
+        if (tor) score -= 0.7;
+        if (relay) score -= 0.2;
+
+        if (score < 0) score = 0;
+        if (score > 1) score = 1;
+
+        const ok = score >= 0.5;
+
+        const details: VpnCheckResultDetails = {
+            ip,
+            ipTimeZone,
+            ipCountry,
+            ipRegion,
+            isVpn: vpn,
+            isProxy: proxy,
+            isTor: tor,
+            isRelay: relay,
+            timezoneDriftHours,
+            clientTimeZone: meta.clientTimeZone,
+            clientTimeOffsetMinutes: meta.clientTimeOffsetMinutes,
+            source: 'vpnapi.io+ip_check.py',
+            ipInfo,
+        };
+
+        const result: VerificationResult & { details: VpnCheckResultDetails } =
+            {
+                ok,
+                score,
+                details,
+            };
+
+        res.json(result);
+    } catch (err) {
+        console.error('vpn:check ip_check.py error:', err);
+
+        const details: VpnCheckResultDetails = {
+            ip,
+            ipTimeZone: null,
+            ipCountry: null,
+            ipRegion: null,
+            isVpn: false,
+            isProxy: false,
+            isTor: false,
+            isRelay: false,
+            timezoneDriftHours: null,
+            clientTimeZone: meta.clientTimeZone,
+            clientTimeOffsetMinutes: meta.clientTimeOffsetMinutes,
+            source: 'ip_check_failed',
+            ipInfo: null,
+        };
+
+        const result: VerificationResult & { details: VpnCheckResultDetails } =
+            {
+                ok: false,
+                score: 0,
+                details,
+            };
+
+        res.status(500).json(result);
+    }
+});
+
+// --------------------------------------------------
+// /verify/location:country  (country + security)
+// --------------------------------------------------
+
 app.post('/verify/location:country', async (req: Request, res: Response) => {
     const ip = getClientIp(req);
     const body = req.body ?? {};
@@ -268,7 +396,16 @@ app.post('/verify/location:country', async (req: Request, res: Response) => {
                 ipCountryCode: null,
                 expectedCountryCode,
                 clientCountryCode,
+                matchesExpectedCountry: null,
+                matchesClientCountry: null,
                 reason: 'no_ip',
+                ipInfo: null,
+                security: {
+                    vpn: null,
+                    proxy: null,
+                    tor: null,
+                    relay: null,
+                },
             },
         };
         res.status(400).json(result);
@@ -276,37 +413,91 @@ app.post('/verify/location:country', async (req: Request, res: Response) => {
     }
 
     try {
-        const pyResult = await runIpCheckPython(ip, expectedCountryCode);
+        const pyExpected = expectedCountryCode ?? clientCountryCode ?? null;
+        const pyResult = await runIpCheckPython(ip, pyExpected);
 
         const ipCountryCode: string | null =
-            (pyResult?.ip_country_code as string | null) ?? null;
-        const sameCountry = pyResult?.same_country as boolean | null;
+            typeof pyResult?.ip_country_code === 'string'
+                ? (pyResult.ip_country_code as string)
+                : null;
+
+        const ipInfo = (pyResult?.ip_info ?? null) as any;
+        const security = (ipInfo?.security ?? {}) as any;
+
+        const vpn = security?.vpn === true || security?.vpn === true;
+        const proxy = security?.proxy === true || security?.proxy === true;
+        const tor = security?.tor === true || security?.tor === true;
+        const relay = security?.relay === true || security?.relay === true;
+
+        const matchesExpectedCountry =
+            expectedCountryCode && ipCountryCode
+                ? ipCountryCode === expectedCountryCode
+                : null;
+
+        const matchesClientCountry =
+            clientCountryCode && ipCountryCode
+                ? ipCountryCode === clientCountryCode
+                : null;
 
         let score = 0.7;
         let reason: string | null = 'no_expected_country';
 
         if (expectedCountryCode) {
-            if (sameCountry === true) {
+            if (matchesExpectedCountry === true) {
                 score = 1.0;
-                reason = 'match';
-            } else if (sameCountry === false) {
+                reason = 'match_expected';
+            } else if (matchesExpectedCountry === false) {
                 score = 0.2;
-                reason = 'country_mismatch';
+                reason = 'expected_country_mismatch';
+            }
+        } else if (matchesClientCountry !== null) {
+            if (matchesClientCountry === true) {
+                score = 1.0;
+                reason = 'match_client_country';
+            } else {
+                score = 0.2;
+                reason = 'client_country_mismatch';
             }
         }
 
-        if (score < 0) score = 0;
-        if (score > 1) score = 1;
+        // Security bazlı penalty
+        let penalty = 0;
+        if (vpn) penalty += 0.4;
+        if (proxy) penalty += 0.3;
+        if (tor) penalty += 0.5;
+        if (relay) penalty += 0.2;
+
+        const rawScore = score - penalty;
+        score = Math.max(0, Math.min(1, rawScore));
+
+        if (vpn || proxy || tor || relay) {
+            if (
+                reason === 'match_expected' ||
+                reason === 'match_client_country'
+            ) {
+                reason = 'country_match_but_ip_security_risky';
+            } else if (!reason || reason === 'no_expected_country') {
+                reason = 'ip_security_risky';
+            }
+        }
 
         const ok = score >= 0.5;
 
-        const details: LocationCountryResult['details'] = {
+        const details: LocationCountryResultDetails = {
             ip,
             ipCountryCode,
             expectedCountryCode,
             clientCountryCode,
+            matchesExpectedCountry,
+            matchesClientCountry,
             reason,
-            ipInfo: pyResult?.ip_info ?? null,
+            ipInfo,
+            security: {
+                vpn,
+                proxy,
+                tor,
+                relay,
+            },
         };
 
         const result: LocationCountryResult = {
@@ -320,7 +511,7 @@ app.post('/verify/location:country', async (req: Request, res: Response) => {
 
         res.json(result);
     } catch (err) {
-        console.error('ip_check.py error:', err);
+        console.error('location:country ip_check.py error:', err);
 
         const result: LocationCountryResult = {
             ok: false,
@@ -333,7 +524,16 @@ app.post('/verify/location:country', async (req: Request, res: Response) => {
                 ipCountryCode: null,
                 expectedCountryCode,
                 clientCountryCode,
+                matchesExpectedCountry: null,
+                matchesClientCountry: null,
                 reason: 'ip_check_failed',
+                ipInfo: null,
+                security: {
+                    vpn: null,
+                    proxy: null,
+                    tor: null,
+                    relay: null,
+                },
             },
         };
 
@@ -343,6 +543,5 @@ app.post('/verify/location:country', async (req: Request, res: Response) => {
 
 const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, () => {
-    // eslint-disable-next-line no-console
     console.log(`node-auth listening on http://localhost:${PORT}`);
 });
